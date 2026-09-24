@@ -5,8 +5,8 @@ portraitTexCoords = 0.0 0.0 1.0 0.0 1.0 1.0 0.0 1.0
 backgroundColor = 0.0 0.0 0.0 1.0
 windowWidth = 800
 windowHeight = 480
-# Stream source URI — any FFmpeg-supported scheme (tcp://, rtsp://, udp://, etc.)
-streamUrl = tcp://127.0.0.1:12346
+# Stream source URI. The Unix socket is the default transport on this branch.
+streamUrl = unix:///tmp/gal_video.sock
 
 # Decoder/render behavior
 dropFramesWhenBusy = 1

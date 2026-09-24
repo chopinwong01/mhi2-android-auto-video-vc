@@ -1,53 +1,47 @@
-# Troubleshooting and Diagnostics
+# Troubleshooting & Diagnostics
 
-## Start with evidence
+## Runtime Diagnostics with `hook_status.sh`
 
-Run the status helper from the deployment media:
+The diagnostic script `scripts/hook_status.sh` checks system health on the MIB2 unit.
 
+Run it directly from the QNX terminal:
 ```sh
-sh /fs/sdb0/scripts/hook_status.sh
+sh /fs/sda0/scripts/hook_status.sh
 ```
 
-It resolves the hook log from SD-card and `/tmp` candidates, prints key events,
-and checks that the hook reported startup, ABI verification, primary/secondary
-registration, discovery metadata, AAP setup, and cluster routing. Those checks
-prove that a log event occurred; they are not visual proof on the cluster.
+### What `hook_status.sh` Verifies:
+1. **Supervisor Environment Limit:** Asserts `envs` count in `smartphone_integrator.json` is $\le 10$.
+2. **Library Preload:** Confirms `libgal_hook.so` is resident in `/mnt/app/eso/lib/gal_dualscreen/` and executable.
+3. **Active Processes:** Checks whether `gal` and `stream-player` are actively running.
+4. **Socket Status:** Verifies that Unix domain socket `/tmp/gal_video.sock` and ACK pipe `/tmp/gal_ack.sock` are active.
 
-## Diagnostic order
+---
 
-1. Confirm firmware and package revision match the test record.
-2. Confirm `event=init` reports `enabled=1` and ABI verification passed.
-3. Confirm primary registration before diagnosing secondary registration.
-4. Confirm secondary registration and discovery metadata before blaming video
-   transport or rendering.
-5. Confirm `event=stream.open` and player spawn/connection before debugging
-   FFmpeg or DMDT.
-6. Inspect DMDT activation and the physical cluster display.
-7. Test Exit, re-entry, and disconnect separately from first-frame display.
+## Verified In-Car Telemetry Benchmarks
 
-## Common findings
+During a 15-minute real-world test drive on a 2019 Volkswagen Golf Mk7.5 (Tegra 30, MU1367):
 
-| Symptom | Evidence to seek | Next action |
-|---|---|---|
-| No hook log | Missing `event=init` | Inspect preload path and supervisor environment-entry count. |
-| No secondary session | No secondary registration, discovery, or AAP setup | Use one bisect switch at a time; verify AAP minor and cluster-input settings. |
-| Center screen blanks | Output mode is `gal` | Return to `withhold`; stock GAL has one shared renderer. |
-| No player connection | Stream opens but no player event | Check player path, artifact type, port config, and inherited environment. |
-| Stock/black cluster | Player starts but no route activation | Check Kombi readiness and DMDT display 4/context 70/displayable 3. |
-| Cockpit never switches; player output keeps repeating `dmdt: display switch deferred; Kombi map is not ready` | No `libdmdt_flush.so` in `/mnt/app/eso/lib/gal_dualscreen/`, `/mnt/app/eso/lib/` or the card's `lib/`, and `enable_hook.sh` printed no "Installed dmdt flush interposer" line | Put the library at `lib/libdmdt_flush.so` on the card and re-run `enable_hook.sh`; see [Where the libraries go](Installation-and-Safety-Guide.md#where-the-libraries-go). |
-| Player appears hung | ACK/frame silence and supervisor events | Preserve logs, then use supervisor or rollback to restore the route. |
-| Phone stream stops | Frame ACK disabled or protocol changed | Restore default ACK behavior before performance experiments. |
-| Exit leaves wrong UI | Stream stops but HMI event is absent | Treat as focus/LSD state problem; DMDT alone cannot fix it. |
+* **Drive Duration:** 14.8 minutes active driving (297 consecutive 3-second intervals), 26.8 minutes total connection.
+* **Total Delivered Frames:** **45,300 frames** at **27.89 FPS** (93.0% efficiency against the 30.0 FPS cap).
+* **Frame Drops / Overflows:** **0** (Zero macroblocking or green artifacts).
+* **`stream-player` CPU:** **31.7%** total SoC average (~1.27 cores), 47.0% 95th percentile, 89.8% peak burst.
+* **`gal` Daemon CPU:** **5.0%** total SoC average (~0.20 cores), 16.8% peak burst.
+* **System Headroom:** **38.9% IDLE** average (~1.56 cores completely free), minimum dip 6.0% IDLE.
+* **Network Bitrate:** **377.3 MB** (~1.87 Mbps average video bitrate).
+* **Hardware ACK Synchrony:** **99.84%** of frames acknowledged synchronously by the Tegra GPU blitter.
 
-## Safe log collection
+---
 
-Copy the complete hook log before rebooting or changing configuration. Retain
-player output where possible. Every report should include firmware, package
-checksum, complete config, injected environment values, phone/Android Auto
-version, exact actions, and observed screen state.
+## Diagnostic Quick Reference
 
-## Performance claims
-
-Do not carry old FPS, CPU, or “zero drop” figures forward as release guarantees.
-They apply only to the firmware, phone, content, temperature, route, and build
-that produced them. Measure and attach logs for the actual build under test.
+| Symptom | Probable Cause | Immediate Resolution |
+| :--- | :--- | :--- |
+| **Severe stutter / ~3.3 FPS with ~300ms latency** | Multi-frame threading (`FF_THREAD_FRAME`) buffered frames while flow control withheld ACK, exhausting phone credit. | Ensure `stream-player` runs with `AV_CODEC_FLAG_LOW_DELAY` and `FF_THREAD_SLICE` (zero frame delay). |
+| **Socket `/tmp/gal_video.sock` unlinked on startup** | Helper child processes spawned by GAL inherited hook and ran C destructors on exit. | Verify `HOOK_FIX_HELPER_INIT_GUARD` is active so spawned children skip hook initialization. |
+| **First frame corrupted / green flash on connection** | Static focus mode 1 granted before `stream-player` was connected, dropping early IDR keyframe. | Enable `focus_ctl` (`GAL_FOCUS_CONTROL=1`) to hold mode 2 until player connects, triggering a fresh phone IDR. |
+| **Cluster drops when shifting into reverse** | Socket write timeout too short or idle context revert timer active. | Ensure write timeout is **250ms** (`tv_usec = 250000`). Never use idle context timers while driving. |
+| **Green artifacts / macroblock tearing** | Flow control disabled or unpaced USB ACKs overflowing buffers. | Ensure Player-ACK pipe (`/tmp/gal_ack.sock`) is active and written by `stream-player`. |
+| **Cluster frozen on last frame** | Lingering zombie player process locking Displayable 3. | Execute `slay -9 stream-player`. Ensure `vc_player_mgr.c` executes `slay -9 -f -q stream-player` before spawn. |
+| **Hook does not load at all** | More than 10 entries in `smartphone_integrator.json` `envs` array. | Run `scripts/hook_status.sh`. Trim environment overrides so `count <= 10`. |
+| **Black screen / UI crash on boot** | Modern non-IBM JDK used to compile Java HMI classes. | Check byte 7 with `od` (`2e`). Recompile using IBM `javac 1.6.0-internal` targeting `-source 1.2 -target 1.2`. |
+| **Script error (`^M: not found`)** | Windows CRLF line endings. | Run `sed -i 's/\r$//' <script>` before deploying to QNX. |

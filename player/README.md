@@ -1,21 +1,29 @@
 # stream-player
 
-Hardware-accelerated video renderer for Harman MHI2 (Nvidia Tegra 30, QNX 6.5.0) cluster displays.
+Hardware-accelerated video renderer for Harman MIB2.5 High (Nvidia Tegra 30, QNX 6.5.0) cluster displays.
 
-`stream-player` decodes secondary Android Auto video frames received over local TCP loopback (`tcp://127.0.0.1:12346`) and renders them into the Volkswagen Virtual Cockpit (Displayable 3, Context 70 / MOST150 Display 4).
+`stream-player` decodes secondary Android Auto H.264 video frames received over the local Unix domain socket (`unix:///tmp/gal_video.sock`) and renders them directly onto the Volkswagen Virtual Cockpit (Displayable 3, Context 70 / MOST150 Display 4).
 
 ---
 
-## Technical Highlights
+## Technical Highlights & Architecture
 
-1. **Hardware Blitter Acceleration:**
-   The MIB2 Harman Tegra 30 GLES2 stack disables online shader compilation (`GL_SHADER_COMPILER == 0`). `stream-player` utilizes Nvidia's hardware blit extension `GL_NV_draw_texture` (`glDrawTextureNV`) for zero-copy presentation.
-2. **End-to-End Hardware Flow Control:**
-   After each frame is swapped onto the display surface via `eglSwapBuffers()`, `stream-player` writes a 1-byte ACK (`0x01`) to `/tmp/gal_ack.sock`. This provides hardware backpressure directly back to Android Auto, preventing buffer overflows and macroblock tearing.
-3. **Multi-Threaded Decoding:**
-   Configured with 2 FFmpeg worker threads (`FF_THREAD_FRAME`) and a 16-slot ring buffer pool to ensure stable 30 FPS playback under concurrent primary screen rendering.
-4. **Resilient Lifecycle:**
-   Automatically re-establishes TCP connections if the stream drops, and cleanly restores factory instrument dials (Context 33) upon termination.
+### 1. Zero Frame Delay Low-Delay Decoding (`AV_CODEC_FLAG_LOW_DELAY`)
+* **The 3.3 FPS Deadlock Failure:** Previous builds attempted multi-core parallel frame decoding via `FF_THREAD_FRAME`. In FFmpeg, frame threading holds onto each decoded frame until the subsequent packet is queued. However, under hardware-paced flow control, the render ACK is withheld until that frame is shown. When the phone runs low on sliding-window credit, it stops sending packets until an ACK arrives. This created a circular deadlock: the phone waited for an ACK, while FFmpeg waited for the next packet to release the frame. Every frame stalled until the phone-side ~300ms timeout expired, collapsing playback to **3.3 FPS with 313ms latency**.
+* **The Resolution:** `stream-player` configures `AV_CODEC_FLAG_LOW_DELAY` with `FF_THREAD_SLICE`. Decoded frames are presented immediately without holding delays. Because 800×480 H.264 decode takes only ~1 ms on a Cortex-A9 core, slice threading provides immediate presentation and returns the render ACK synchronously at rock-solid 30 FPS.
+
+### 2. Hardware Blitter & Fragment Shader Pipeline
+* **Tegra 3 GLES2 Implementation:** The MIB2 Harman Tegra 30 GLES2 stack disables online shader compilation (`GL_SHADER_COMPILER == 0`). `stream-player` renders via Nvidia's hardware blit extension `GL_NV_draw_texture` (`glDrawTextureNV`) or GPU texture mapping.
+* Uploads Y, U, and V planes as separate luminance textures and performs BT.601 color matrix math directly in hardware.
+
+### 3. End-to-End Hardware Flow Control
+* After each frame is swapped onto the display surface via `eglSwapBuffers()`, `stream-player` writes a 1-byte ACK (`0x01`) to `/tmp/gal_ack.sock`.
+* This delivers hardware backpressure directly back to Android Auto, keeping phone encoding locked synchronously to physical display presentation and eliminating buffer overflows.
+
+### 4. Resilient Lifecycle & DMDT Context Management
+* **Unix Domain Socket:** Ingests raw NALUs via `unix:///tmp/gal_video.sock`. Automatically reconnects on stream drops.
+* **Keyframe Gate:** Gated to display frames only after the initial IDR keyframe has been decoded.
+* **Context Restoration:** Cleanly restores factory instrument dials (Context 33) upon normal teardown, SIGTERM/SIGINT, or unhandled exit.
 
 ---
 

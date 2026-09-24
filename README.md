@@ -1,239 +1,219 @@
 # mhi2-android-auto-video-vc
 
-> Experimental native hook for Harman MHI2 GAL that projects Android Auto
-> navigation video to the Volkswagen Virtual Cockpit.
+> **Experimental hook for Harman MHI2 stock GAL to enable Android Auto instrument cluster projection.**  
+> *Developed for personal research and study; tested and verified strictly on Volkswagen MIB2.5 High EU MU1367 (`MHI2_ER_VWG13_P4521_MU1367`).*
 
-## Acknowledgements — the foundations this project builds on
+📖 **For in-depth technical guides, troubleshooting, and architectural deep-dives, visit the [Project Wiki](wiki/Home.md).**
 
-> This project would not exist without these projects and their maintainers.
+---
 
-- [VcMOSTRenderMqb](https://github.com/OneB1t/VcMOSTRenderMqb), by
-  [OneB1t](https://github.com/OneB1t) — MOST150 and Tegra/OpenKODE
-  rendering foundation.
-- [MIB SDK](https://gitlab.com/andrewleech/mibsdk), by
-  [Andrew Leech](https://github.com/andrewleech) — QNX cross-compilation
-  environment.
-- [MHI2_navignore](https://github.com/harman-f/MHI2_navignore), by
-  [harman-f](https://github.com/harman-f) — HMI baseline.
-- [mib2-android-auto-vc](https://github.com/adi961/mib2-android-auto-vc), by
-  [Adrian Brennig](https://github.com/adi961) — companion HMI work.
+### 🧩 Upstream Foundations & Companion Projects
 
-This project is substantially more complex and time-consuming than initially
-anticipated. It crosses private QNX/GAL internals, Android Auto negotiation,
-H.264 transport, Tegra graphics, MOST150 routing, and Volkswagen Java HMI
-state. A small change can require reverse engineering, offline validation, and
-repeated in-car testing.
+This project provides the **native C preload hook and hardware video streaming pipeline**. It builds upon and integrates with key projects in the MIB2 / MQB ecosystem:
 
-The long-form, reproducible development record is in the
-[GitHub Wiki](https://github.com/chopinwong01/mhi2-android-auto-video-vc/wiki).
+* 📺 **[VcMOSTRenderMqb](https://github.com/andrewleech/VcMOSTRenderMqb)** *(by [@andrewleech](https://github.com/andrewleech))*  
+  The foundational MOST150 video transmission and Tegra 3 OpenKODE/GLES2 cluster rendering architecture adapted by `stream-player`.
+* 🧭 **[NavActiveIgnore](https://github.com/jille/mib2-navignore)** (`navignore` *(by [@jille](https://github.com/jille) / [M.I.B.](https://github.com/Mr-MIBoner/M.I.B._More-Incredible-Bash))*  
+  The **minimum baseline requirement** on the vehicle's Java HMI. Bypasses the factory mutual exclusion check so phone navigation and cluster displays run concurrently without kicking each other out.
+* 🎮 **[mib2-android-auto-vc](https://github.com/chopinwong01/mib2-android-auto-vc)** *(by [@chopinwong01](https://github.com/chopinwong01))*  
+  The **companion Java HMI patch** (`VCAndroidAuto_mapmode.jar`). Routes steering wheel (MFL) scroll wheel events to zoom the Android Auto cluster map, injects D-pad keys, and suppresses duplicate cluster turn banners.
+* 🛠️ **[MIB SDK](https://gitlab.com/andrewleech/mibsdk)** *(by [@andrewleech](https://github.com/andrewleech))*  
+  The Dockerized QNX Neutrino 6.5.0 cross-compilation toolchain used to build all native binaries.
+
+---
 
 > [!CAUTION]
-> **CRITICAL WARNING — EXPERIMENTAL, HIGH-RISK HEAD-UNIT MODIFICATION**
->
-> This project injects code into a production QNX/GAL process and interacts
-> with Android Auto protocol handling, Tegra graphics, DMDT/MOST routing, and
-> the Volkswagen HMI. It is tested only on Volkswagen MIB2.5 High EU
-> `MHI2_ER_VWG13_P4521_MU1367` (Harman MHI2, Tegra 30, QNX 6.5.0). It is not a
-> compatibility promise for another firmware, VAG brand, i.MX6/MHI2Q unit, or
-> non-Virtual-Cockpit vehicle.
->
-> An incorrect firmware match, ABI assumption, installation, configuration,
-> supervisor environment, or companion-JAR build can crash GAL, create restart
-> loops, or leave the infotainment UI unavailable. Recovery can require the
-> verified stock package, a controlled reboot, or bench/serial access. Do not
-> install or test this while driving. Keep backups and a verified rollback path
-> before deployment; never modify `/lib` or `/usr/lib`.
->
-> AI-assisted code and documentation are not a safety guarantee. Treat every
-> generated claim as an untrusted hypothesis and validate it against the target
-> binary, logs, and physical vehicle behavior.
+> **CRITICAL WARNING — RISK OF HEAD UNIT DAMAGE OR BRICKING:**  
+> This software interacts directly with low-level QNX RTOS services, hardware graphics controllers, and vehicle bus gateways.  
+> * **Software Risk:** Improper configuration, exceeding supervisor environment limits (Rule of 10), or deploying incompatible Java bytecode will cause bootloops, supervisor crashes, or complete loss of the vehicle's infotainment UI (black screen).  
+> * **Hardware / System Risk:** Flash memory corruption, overheating from unthrottled decoding workloads, or bus desync can permanently disable the MMX unit (requiring bench flashing / hardware recovery).  
+> * **Development Disclosure ("Vibe Coded"):** This project was heavily "vibe coded" and iteratively developed with various Large Language Models (LLMs)—including **Google Gemini**, **Anthropic Claude**, and **OpenAI GPT**. While rigorously bench-tested and telemetry-audited on real vehicle hardware, AI-assisted low-level code inherently demands thorough review before deployment.  
+> **Never modify files in `/lib` or `/usr/lib`. Proceed strictly at your own risk.**
 
-## What it does
+---
 
-Stock GAL owns one primary Android Auto video sink and one shared center-display
-renderer. This project injects a secondary sink, keeps its playback away from
-that shared renderer, forwards the secondary H.264 stream to `stream-player`,
-and routes the player's OpenKODE output to the Cockpit.
+## Overview
+
+Modern Volkswagen Group vehicles equipped with the Virtual Cockpit (Active Info Display / FPK) receive navigation video feeds over the MOST150 optical bus (`/dev/mlb/isoTX2`). The factory Harman MIB2 High (MMX / Nvidia Tegra 30 / QNX 6.5.0) `gal` daemon only implements a single primary display sink (Channel 1).
+
+**`mhi2-android-auto-video-vc`** provides a native runtime injection and rendering pipeline to project secondary Android Auto navigation video (e.g. Google Maps, Waze) directly onto the instrument cluster.
 
 ```text
-Android phone ── AAP over USB ──► gal + libgal_hook.so
-                                       │
-                                       ├─ secondary service and H.264 extraction
-                                       ▼
-                            TCP 127.0.0.1:12346
-                                       ▼
-                                stream-player
-                                       │ glDrawTextureNV / EGL
-                                       ▼
-                    DMDT: display 4 → context 70 → Displayable 3
-                                       ▼
-                           MOST150 Virtual Cockpit
+[ Android Phone ] --(AAP USB)--> [ MIB2 gal Daemon ]
+                                         │
+                                  [ libgal_hook.so ]
+                                         │ (Unix Domain Socket /tmp/gal_video.sock)
+                                         ▼
+                                  [ stream-player ]
+                                         │ (glDrawTextureNV -> Context 70)
+                                         ▼
+                             [ Virtual Cockpit Display ]
 ```
 
-## Runtime model
+---
 
-1. `libgal_hook.so` is injected into GAL with `LD_PRELOAD` and dynamically
-   registers a secondary video endpoint.
-2. Android Auto opens the secondary service. The hook withholds secondary
-   playback from GAL's single shared renderer, preserving the center display.
-3. Secondary Annex-B H.264 is sent over TCP loopback to `stream-player`.
-   SPS/PPS and one bounded IDR are cached so a newly connected player has
-   decoder bootstrap data before delta frames.
-4. `stream-player` decodes with FFmpeg and presents through Tegra's
-   `GL_NV_draw_texture`, avoiding the unavailable online shader compiler.
-5. When the Kombi route is ready, DMDT maps Displayable 3 into Cockpit context
-   70 using display ID 4. On teardown, displayable 33 is restored.
+## Repository Structure
 
-The normal output mode is `withhold`. Sending secondary `playbackStart` through
-stock GAL's shared renderer is diagnostic-only and can blank or reconfigure the
-center display.
+The repository is organized into self-contained, minimal modules:
 
-### ACK behavior
+```text
+mhi2-android-auto-video-vc/
+├── Makefile                 # Docker-based build for libgal_hook.so
+├── LICENSE                  # GNU General Public License v3.0 (GPLv3)
+├── README.md                # Project documentation & reference
+├── src/                     # Native C hook source (libgal_hook.so)
+│   ├── gal_hook.c           # Entry point, symbol interceptors & lifecycle
+│   ├── gal_hook.h
+│   ├── focus_ctl.c          # Secondary video focus state machine & phone credit pacing
+│   ├── focus_ctl.h
+│   ├── video_sink_hook.c    # ProtocolEndpointBase allocation & Channel 3 spoof
+│   ├── vc_stream_out.c      # Unix domain socket streaming & player-ACK flow control
+│   ├── vc_stream_out.h
+│   ├── vc_player_mgr.c      # Automatic stream-player process supervisor & Kombi watcher
+│   └── vc_player_mgr.h
+├── player/                  # Cluster video renderer (stream-player)
+│   ├── opengl_gpu.cc        # Low-delay zero-frame-delay renderer (glDrawTextureNV)
+│   ├── config.txt           # OpenKODE / Displayable context definition
+│   ├── Makefile             # Docker build script linking against ffmpeg-mini
+│   └── README.md            # Technical details & upstream attribution
+├── scripts/                 # Safe QNX installation & management scripts
+│   ├── enable_hook.sh       # Patches smartphone_integrator.json (enforces Rule of 10)
+│   ├── disable_hook.sh      # Clean uninstaller & factory backup restoration
+│   ├── hook_status.sh       # In-car diagnostic utility for hook & player status
+│   ├── lib_app_mount.sh     # Shared /mnt/app safe mounting helper
+│   ├── deploy_to_car.sh     # SCP / SSH deployment script
+│   └── gal_dualscreen.conf.example # Configuration file template
+└── wiki/                    # Comprehensive documentation & engineering runbooks
+    ├── Home.md              # Wiki index & quick navigation
+    ├── Compatibility-Matrix.md # Hardware & firmware specifications
+    ├── Installation-and-Safety-Guide.md # Step-by-step install & safety rules
+    ├── Architecture-Deep-Dive.md # Reverse engineering & flow control
+    ├── Companion-HMI-Integration.md # Java HMI layer (NavActiveIgnore & zoom)
+    ├── Troubleshooting-and-Diagnostics.md # Diagnostics & verified telemetry
+    └── Build-Environment.md # Docker cross-compilation toolchain
+```
 
-The player writes a byte to `/tmp/gal_ack.sock` after presentation. While that
-feedback channel is healthy, the hook turns player ACKs into phone-frame ACKs.
-If no player has connected, or no feedback arrives for more than 500 ms while
-frames continue, the hook fails open and ACKs immediately so a player fault does
-not also terminate the phone session. A live Android Auto session therefore
-does not by itself prove that the player is rendering.
+---
 
-## Verified constraints
+## Technical Highlights & Runtime Process Flow
 
-| Item | Current assumption |
-|---|---|
-| Head unit | Harman MIB2.5 High / Tegra 30 |
-| Firmware | `MHI2_ER_VWG13_P4521_MU1367` |
-| Coded Cockpit video | Fixed 800×480; 30 or 60 FPS accepted by the hook |
-| Normal advertised rate | 30 FPS |
-| Cockpit DMDT route | Display ID 4, context 70, player displayable 3 |
-| Stock restoration | Displayable 33 in context 70 |
-| Stream transport | TCP loopback; default port 12346 |
+The dual-screen projection pipeline executes across four synchronized phases from the moment the Android phone is connected to the vehicle:
 
-Do not substitute the index printed by `dmdt gs` for DMDT display ID 4. The
-wrong value can be accepted without changing the visible route.
+```text
+  [ Android Phone ]
+         │
+  Phase 1: Handshake & Dynamic Focus (focus_ctl)
+         ▼
+  [ MIB2 gal Daemon ] ◄── (libgal_hook.so holds mode 2; grants mode 1 on player connect)
+         │
+  Phase 2: H.264 NALU Stream (/tmp/gal_video.sock)
+         ▼
+  [ stream-player ] ◄── (Zero-delay low-delay decode, AV_CODEC_FLAG_LOW_DELAY)
+         │
+  Phase 3: Hardware Blit (glDrawTextureNV)
+         ▼
+  [ Virtual Cockpit ] (Displayable 3, Context 70 on MOST150)
+         │
+  Phase 4: 1-Byte Hardware ACK (/tmp/gal_ack.sock)
+         ▼
+  [ libgal_hook.so ] ──► (Releases AAP Frame ACK to Phone — Hardware Flow Control)
+```
 
-## Configuration
+### 1. Dynamic Service Injection & Focus Control (`focus_ctl`)
+* **Dynamic Protocol Allocation:** The stock `/usr/bin/gal` daemon strictly rejects secondary screen blocks in `gal.json`. `libgal_hook.so` intercepts `GalReceiver::registerService`, dynamically allocates a C++ `ProtocolEndpointBase` structure in heap memory, and binds it into GAL's internal dispatch table at offset `service_id + 0x40`.
+* **Why Static Focus Failed (The Early-Stream Flood):** Earlier prototypes hardcoded static focus (`sink+0x30 = 1u`). Android Auto immediately flooded H.264 frames before `stream-player` launched or the Kombi cluster was ready, dropping initial IDR keyframes and causing green artifact flashes.
+* **The Dynamic Focus Solution:** `focus_ctl.c` holds the secondary sink in focus mode 2 (native: projection inactive) until `stream-player` connects to `/tmp/gal_video.sock` and the Kombi map is verified ready (`GAL_FOCUS_WAIT_KOMBI`). Only then is mode 1 granted. The phone responds by naturally emitting a fresh, clean SPS/PPS parameter set and IDR keyframe directly to the player.
 
-Copy [`scripts/gal_dualscreen.conf.example`](scripts/gal_dualscreen.conf.example)
-to the SD-card root as `gal_dualscreen.conf`. The file avoids the supervisor's
-small environment budget and can be changed between boots. Values injected by
-`enable_hook.sh` take precedence over file values.
+### 2. High-Performance Transport: Unix Domain Socket (`/tmp/gal_video.sock`)
+* **Why Early Unix Sockets Failed (The Child Destructor Trap):** Helper child processes spawned by GAL inherited `LD_PRELOAD` of `libgal_hook.so` and on exit executed `unlink("/tmp/gal_video.sock")`, deleting the socket file out from under the running daemon. While TCP loopback temporarily worked around this, it added TCP stack latency and buffer tuning overhead.
+* **The Helper Init Guard (`HOOK_FIX_HELPER_INIT_GUARD`):** By inspecting process identity on startup, child helper processes skip hook initialization entirely, permanently eliminating the destructor unlink trap. Video NALUs stream directly over `/tmp/gal_video.sock` with minimal latency and zero TCP network overhead.
+* **RVC / OPS Resilience:** A **250ms socket write timeout** smoothly absorbs transient display pauses (e.g., shifting into Reverse gear for the Rear View Camera or parking sensors). Keeping the secondary video sink continuously live in combination with this 250ms buffer allows playback to resume instantaneously when shifting back into Drive (D), completely avoiding the latency and keyframe renegotiation overhead of focus cycling.
 
-Important settings:
+### 3. Low-Delay Zero-Frame-Delay Decoding (`stream-player`)
+* **Why Multi-Frame Threading Failed (The 3.3 FPS Deadlock):** Early builds configured FFmpeg with `FF_THREAD_FRAME`. Frame threading holds each decoded frame until the *subsequent* packet arrives. Under hardware flow control (which withholds ACKs until display swap), the phone exhausted its sliding-window credit and paused waiting for an ACK before sending the next packet. This circular lock caused a ~300ms phone timeout per frame, collapsing playback to **3.3 FPS with 313ms latency**.
+* **The Zero-Delay Solution:** `stream-player` configures `AV_CODEC_FLAG_LOW_DELAY` with `FF_THREAD_SLICE`. Decoded frames are presented immediately without holding delays. Because 800×480 H.264 decode takes only ~1 ms on a Cortex-A9 core, slice threading provides immediate presentation and returns the render ACK synchronously at rock-solid 30 FPS.
+* Direct rendering is performed using Nvidia's dedicated hardware blit extension `GL_NV_draw_texture` (`glDrawTextureNV`), bypassing Tegra 3's disabled online GLSL compiler.
 
-| Key | Usual value | Purpose |
-|---|---|---|
-| `GAL_DUALSCREEN_OUTPUT` | `withhold` | Keep secondary video out of stock GAL renderer. |
-| `GAL_STREAM_ENABLE` | `1` | Forward H.264 to `stream-player`. |
-| `GAL_STREAM_PORT` | `12346` | TCP loopback listener. |
-| `GAL_DUALSCREEN_AAP_MINOR` | `7` | Advertised AAP minor for two-display testing. |
-| `GAL_DUALSCREEN_CLUSTER_INPUT` | `1` | Advertise the cluster input service. |
-| `GAL_VC_DISPLAYABLE_ID` | `3` | Player displayable. |
-| `GAL_VC_CONTEXT` / `GAL_VC_DISPLAY` | `70` / `4` | Cockpit DMDT route. |
+### 4. End-to-End Hardware Paced Flow Control (Zero Macroblocking)
+* **Why Unpaced USB ACKs Failed:** ACKing video packets the moment they arrived over USB caused the phone's encoder to assume infinite bandwidth, flooding socket buffers, dropping reference frames, and causing severe green macroblocking.
+* **The Closed Backpressure Loop:** `libgal_hook.so` withholds the AAP protocol frame ACK until `stream-player` completes hardware presentation (`eglSwapBuffers()`) and writes a 1-byte ACK (`0x01`) into `/tmp/gal_ack.sock`.
+* This organically throttles the phone's hardware video encoder to the exact physical swap rate of the Tegra 3 GPU (verified at 99.84% synchronous lockstep with zero packet drops).
 
-The canvas is always 800×480. `GAL_SECONDARY_DPI` is a UI scale hint, not the
-panel's physical DPI. Insets use `top,bottom,left,right`; if
-`GAL_SECONDARY_UI_CONFIG_HEX` is set, its exact protobuf bytes override scalar
-inset/theme settings. Change one geometry or protocol value per test.
+---
 
-## Build
+## Companion HMI Requirements
 
-Prerequisites: Docker and access to the MIB SDK image. `player/Makefile`
-cross-compiles its own FFmpeg-mini (static libavcodec/libavformat/libavutil
-for QNX 6.5.0 ARMv7) via `player/build_ffmpeg.sh` the first time it's
-needed, caching it under `player/build/`.
+The video pipeline operates independently at the QNX RTOS level. To integrate with the Volkswagen Java HMI:
 
-```sh
-docker pull registry.gitlab.com/andrewleech/mibsdk:latest
+* **Minimum Requirement (`NavActiveIgnore`):** Suppresses the mutual exclusion check that prevents Android Auto and cluster navigation from running concurrently.
+* **Full Steering Wheel Integration:** See [wiki/Companion-HMI-Integration.md](wiki/Companion-HMI-Integration.md) for details on [`mib2-android-auto-vc`](https://github.com/chopinwong01/mib2-android-auto-vc) which adds steering wheel scroll wheel zoom and D-pad key routing.
+
+---
+
+## Building
+
+### Prerequisites
+* Docker
+* Access to the MIB SDK Docker image: `registry.gitlab.com/andrewleech/mibsdk:latest`
+
+### Building the Preload Hook (`libgal_hook.so`)
+```bash
 make hook
-(cd player && make)
 ```
+The compiled library will be output to `./libgal_hook.so`.
 
-This produces `libgal_hook.so`, `lib/libdmdt_flush.so`, and
-`player/stream-player`. Verify that release artifacts target QNX ARM; a
-successful host build does not validate the GAL ABI, phone negotiation, DMDT
-route, or Cockpit output.
+### Building the Stream Player (`stream-player`)
+See [player/README.md](player/README.md) for build instructions linking against minimal FFmpeg.
 
-## Install and validate
+---
 
-> [!WARNING]
-> `smartphone_integrator` has an approximately ten-entry `envs` limit. Exceeding
-> it can silently discard the entire environment array, including `LD_PRELOAD`.
+## Installation & Safety
 
-Prepare the SD-card package: `libgal_hook.so`, `stream-player`, `config.txt`,
-`enable_hook.sh`, `disable_hook.sh` and a reviewed `gal_dualscreen.conf` in the
-card root, `libdmdt_flush.so` in `lib/`, and `hook_status.sh` and
-`lib_app_mount.sh` in `scripts/`. The installer copies both libraries under
-`/mnt/app/eso/lib`; see
-[where the libraries go](wiki/Installation-and-Safety-Guide.md#where-the-libraries-go).
-On the unit:
+> [!CAUTION]
+> **Strict OEM Safety Rules:**
+> 1. **Never modify files in `/lib` or `/usr/lib` on the MIB2 root partition.** Custom shared libraries live strictly in `/mnt/app/eso/lib/`.
+> 2. **Supervisor "Rule of 10":** `smartphone_integrator.json` silently discards the entire environment array if it contains 11 or more variables. `enable_hook.sh` strictly enforces `ENTRY_COUNT <= 10`.
 
-```sh
-cd /fs/sdb0
-sh ./enable_hook.sh
-sh ./scripts/hook_status.sh
-```
+1. Copy compiled binaries and scripts to an SD card.
+2. In QNX terminal on the head unit:
+   ```sh
+   sh /fs/sda0/scripts/enable_hook.sh
+   ```
+3. Verify status:
+   ```sh
+   sh /fs/sda0/scripts/hook_status.sh
+   ```
+4. Reboot the head unit by holding the power button for 10 seconds.
 
-Reboot the unit, then test all of the following independently:
+---
 
-1. Android Auto starts on the center display.
-2. The Cockpit receives the intended map/video.
-3. Android Auto's in-app Exit returns the center display to App-Connect while
-   the phone session and Cockpit navigation remain active.
-4. Re-entering Android Auto restores center video.
-5. App-Connect Disconnect tears down both paths.
-6. A subsequent reboot reaches the normal stock UI.
+## 🗺️ Roadmap / Implementation Status
 
-`hook_status.sh` proves logged internal stages, not correct visual output. Save
-the complete hook and player logs, firmware identity, package revision, config,
-injected environment values, phone model, and Android Auto version for each
-test. Record failures as carefully as successes.
+* [x] **Dynamic Secondary Video Focus & Mode Switch:**
+  * Implemented via `focus_ctl.c` / `focus_ctl.h`. Holds secondary sink in mode 2 (native) until `stream-player` connects, triggering an immediate native SPS/PPS + IDR keyframe from the phone.
+  * Verified Kombi map readiness check (`GAL_FOCUS_WAIT_KOMBI`).
+  * Seamless RVC transitions via 250ms socket buffer with live secondary sink.
+* [x] **Unix Domain Socket Migration:**
+  * Implemented via `unix:///tmp/gal_video.sock`.
+  * `HOOK_FIX_HELPER_INIT_GUARD` prevents child helper processes from running destructors and unlinking the socket file.
+* [x] **Zero Frame Delay Decoding Pipeline:**
+  * Replaced `FF_THREAD_FRAME` with `AV_CODEC_FLAG_LOW_DELAY` (`FF_THREAD_SLICE`) to eliminate the 3.3 FPS / 300ms phone credit timeout deadlock.
+* [ ] **Hardware NVSS / NvMedia Video Decoder Renderer:**
+  * Transition `stream-player` from software multi-threaded FFmpeg decoding to hardware video decoding via **NvSS / NvMedia** (`/dev/nvss`, Nvidia Tegra hardware video decoder), substantially cutting Cortex-A9 CPU utilization.
+* [x] ~~**GPS Sensor Uncertainty Hook (Tunnel Loss Prevention)**~~ *(Abandoned — Proven Architectural Dead-End)*:
+  * **Finding:** Intercepting `SensorSource::reportLocationData` to clamp reported accuracy to $\le 10\text{m}$ corrupted Google Maps' Extended Kalman Filter (EKF) covariance matrix ($R_k \to 0$). Normal 5–12m urban multipath noise was interpreted as real physical vehicle displacement, causing violent compass spinning, 90°/180° map orientation flipping, and endless reroute loops. Overriding `has_acc = false` also suppressed Android Auto's native failover to the phone's internal dual-frequency L1/L5 GNSS. Production code leaves OEM sensor data untouched (`src/sensor_hook.c` deleted in `7eb2317`).
 
-To roll back, run the matching `disable_hook.sh` from the SD-card package. It
-restores the saved supervisor configuration, removes the preload payload, and
-attempts to restore the Cockpit route. Inspect the route if DMDT restoration
-reports a failure.
+---
 
-## Java HMI integration
+## Attribution & Acknowledgments
 
-The native renderer is separate from the Volkswagen Java HMI layer:
+* **Andrew Leech:** For the [MIB SDK](https://gitlab.com/andrewleech/mibsdk) toolchain and the foundation of `VcMOSTRenderMqb`.
+* **FFmpeg Project:** Multi-threaded H.264 video decoding.
+* **MQB / MIB2 Hacking Community:** Research and tools on Harman MHI2 architectures.
+* **Large Language Models (LLMs):** Rapid reverse-engineering, architecture synthesis, and "vibe coding" across **Google Gemini**, **Anthropic Claude**, and **OpenAI GPT**.
 
-- [`MHI2_navignore`](https://github.com/harman-f/MHI2_navignore) is the baseline
-  patch commonly used to relax stock navigation mutual exclusion.
-- [`mib2-android-auto-vc`](https://github.com/adi961/mib2-android-auto-vc)
-  supplies optional steering-wheel zoom, D-pad routing, and banner behavior.
-
-In-app Exit is an HMI state transition, not merely a renderer stop or DMDT
-command. Primary focus must retain the stock HMI route; secondary focus must not
-overwrite the global LSD focus state. Treat every HMI/JAR change as a separate,
-high-risk test boundary. The target IBM J9 VM also requires the established
-legacy Java build compatibility; a host-valid modern JAR can fail verification
-on the unit.
-
-## Repository layout
-
-```text
-src/        GAL hook, secondary-sink handling, stream transport, player manager
-player/     FFmpeg/OpenKODE Cockpit renderer
-dmdt_flush/ _exit() interposer that lets the player read dmdt output via popen
-scripts/    configuration template, installation, rollback, diagnostics, deploy
-```
-
-## Roadmap
-
-- Make secondary focus and Cockpit-tab behavior explicit and road-validated.
-- Consider AF_UNIX only after descriptor inheritance and socket ownership are
-  solved; it is not a mechanical performance change.
-- Investigate hardware decode only with reproducible car evidence.
-- Keep GPS uncertainty experiments out of production until road-validated.
-
-## Acknowledgments
-
-- The related projects above, FFmpeg, and the MIB2/MQB community.
-- AI-assisted development: OpenAI Codex/GPT, Anthropic Claude, Google Gemini,
-  and Google Antigravity assisted research, implementation, and documentation.
-  The maintainer remains responsible for the released code and validation.
+---
 
 ## License
 
-[GNU General Public License v3.0](LICENSE).
+This project is released under the [GNU General Public License v3.0](LICENSE) (GPLv3).

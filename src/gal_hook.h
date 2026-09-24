@@ -67,7 +67,8 @@ int gal_hook_cluster_input_enabled(void);
  *
  *   withhold  Do not forward playbackStart to GAL. The sink stays registered
  *             and frames arrive via handleDataAvailable, are ACKed, and are
- *             forwarded over TCP to stream-player (127.0.0.1:12346).
+ *             forwarded over Unix socket to stream-player
+ *             (/tmp/gal_video.sock).
  *             Main screen untouched. This is the only production path.
  *
  *   gal       Forward playbackStart to GAL. Stock path; reconfigures the
@@ -92,6 +93,30 @@ int gal_hook_focus_mirror_enabled(void);
 int gal_hook_main_input_id_enabled(void);
 const char *gal_hook_output_mode_name(void);
 const gal_secondary_config *gal_hook_config(void);
+/*
+ * Isolated fixes from the 2026-09-15 Unix-socket car test. Each defaults ON;
+ * setting its key to 0 in the environment or gal_dualscreen.conf runs the
+ * previous code for that fix only. Every action a fix takes is logged with
+ * fix=<name>, and init logs one event=fix.config line with all values.
+ * hook_fix_enabled() reports the effective value: FOCUS_CONTROL needs
+ * withhold output and GAL_STREAM_ENABLE, and ACK_RENDERED_ONLY and
+ * NO_IDR_REPLAY need FOCUS_CONTROL.
+ */
+typedef enum {
+    HOOK_FIX_HELPER_INIT_GUARD = 0, /* GAL_FIX_HELPER_INIT_GUARD: processes GAL spawns skip hook init */
+    HOOK_FIX_FOCUS_CONTROL,         /* GAL_FOCUS_CONTROL: secondary held in focus mode 2 until the player is ready */
+    HOOK_FIX_ACK_RENDERED_ONLY,     /* GAL_FIX_ACK_RENDERED_ONLY: only player render ACKs reach the phone */
+    HOOK_FIX_NO_IDR_REPLAY,         /* GAL_FIX_NO_IDR_REPLAY: no codec-config/IDR replay or withholding on accept */
+    HOOK_FIX_STREAM_TIMING,         /* GAL_FIX_STREAM_TIMING: send and send->ACK timing log every 30 frames */
+    HOOK_FIX_PLAYER_LOG,            /* GAL_FIX_PLAYER_LOG: spawn() the player with its output in /tmp/stream-player.log */
+    HOOK_FIX_ORPHAN_RESTORE,        /* GAL_FIX_ORPHAN_RESTORE: find orphan players by lock; restore the display after killing one */
+    HOOK_FIX_COUNT
+} hook_fix;
+int hook_fix_enabled(hook_fix fix);
+/* GAL_FOCUS_START=stock lets gal's setup-time mode 1 through; default native. */
+int gal_hook_focus_start_native(void);
+/* GAL_FOCUS_WAIT_KOMBI: the first grant also waits for the Kombi map. */
+int gal_hook_focus_wait_kombi(void);
 
 #ifdef __cplusplus
 }

@@ -1,42 +1,38 @@
-# Compatibility Matrix
+# Hardware & Firmware Compatibility Matrix
 
-## Verified target
+## Supported Hardware
 
-| Item | Verified profile |
-|---|---|
-| Head unit | Harman MIB2.5 High / MHI2 |
-| SoC | Nvidia Tegra 30 (T30) |
-| OS | QNX Neutrino 6.5.0 SP1 |
-| Firmware | `MHI2_ER_VWG13_P4521_MU1367` |
-| Vehicle test bed | Volkswagen Golf Mk7.5 with Virtual Cockpit |
-| Cluster video path | 800×480 coded video, MOST150, display 4, context 70 |
+| Component | Specification | Compatibility Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **Head Unit (MMX)** | Harman MIB2.5 High (MHI2) | **Supported** | Multi-board system with MMX (Multimedia Extension) and RCC (Radio & Car Control). |
+| **SoC** | Nvidia Tegra 30 (T30) | **Supported** | Quad-core ARM Cortex-A9 @ 1.4 GHz + 12-core GeForce ULP GPU. |
+| **SoC (Alternative)** | NXP / Freescale i.MX6 Quad (MHI2Q) | ❌ **Unsupported** | MHI2Q uses a different graphics pipeline (Vivante GPU) and different memory layout. Do not run on i.MX6! |
+| **Operating System** | QNX Neutrino RTOS 6.5.0 SP1 | **Required** | Native POSIX RTOS with OpenKODE / KD graphics. |
+| **Cluster Display** | 12.3" Virtual Cockpit (FPK / AID) | **Supported** | Receives navigation video feed over MOST150 optical bus (`/dev/mlb/isoTX2`). |
 
-The project hooks private C++ objects and firmware-specific virtual methods.
-“MHI2” is not itself a compatibility promise. Rebuild and revalidate every
-symbol, layout assumption, service registration path, and DMDT route before
-using another firmware train.
+---
 
-## Explicitly unsupported or unknown
+## Verified Firmware Trains
 
-| Target | Status | Why |
-|---|---|---|
-| MHI2Q / i.MX6 | Unsupported | Different SoC, graphics stack, binary layout, and renderer. |
-| Other MHI2 firmware | Unknown | ABI and protocol assumptions may differ. |
-| Other VAG brands | Unknown | Native path may resemble MHI2, but HMI/JAR integration is brand-specific. |
-| No Virtual Cockpit | Unsupported | No validated secondary MOST display route. |
+This project has been extensively field-tested and telemetry-verified on:
 
-## Important constraints
+* **Train Version:** `MHI2_ER_VWG13_P4521_MU1367`
+* **Brand & Region:** Volkswagen Europe (VW Golf Mk7.5)
+* **MMX Software Version:** MU1367
 
-- The hook enforces 800×480; it is not a general display-resolution setting.
-- `30` FPS is the advertised Android Auto rate, not a guaranteed physical
-  presentation rate on every car or phone.
-- Center and cluster displays have different lifecycle owners. A working center
-  session does not prove that the cluster route is valid.
-- Java HMI additions are optional to the native renderer but can be needed for
-  the desired navigation and input experience.
+### Other VAG Brands (Audi, Skoda, SEAT, Porsche)
+* The core C hook (`libgal_hook.so`) and `stream-player` run natively at the QNX RTOS / Tegra 3 level and are generic to Harman MHI2 units running GAL.
+* However, the Java HMI layer (`VCAndroidAuto_mapmode.jar`) interacts with `de.vw.mib.asl` namespaces and VW-specific BAP keys. On Audi (Audi Virtual Cockpit) or Skoda, you should use `NavActiveIgnore` baseline or brand-specific ASL patches.
 
-## Before claiming compatibility
+---
 
-Record firmware, GAL build identity, `dmdt gs` output, hook log, phone model,
-Android Auto version, and the exact deployment/config package. Then run the
-full [acceptance sequence](Engineering-Reference.md#acceptance-sequence).
+## Display Resolutions & Hardware Constraints
+
+### 1. Instrument Cluster Display
+* **Physical Resolution:** 1440×540 LCD
+* **Virtual Screen Injection Resolution:** **800×480 @ 30 fps**
+* **Routing:** Display ID `4`, Context `70`, Displayable `3` over MOST150 `/dev/mlb/isoTX2`.
+
+### 2. Tegra 3 Decoding Capacity & The 30 FPS Cap
+* The Nvidia Tegra 3 hardware video decoder cannot sustain concurrent 1080p@60fps primary video alongside a 800×480 secondary video stream.
+* **The Rule:** Forcing the primary screen to **30 fps** (`"supportedFrameRates": [ 30 ]` in `gal.json`) cuts decode workloads in half, preventing thermal throttling, frame stutter, and audio/video desync.

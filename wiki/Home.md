@@ -1,60 +1,80 @@
-# mhi2-android-auto-video-vc
+# Welcome to the `mhi2-android-auto-video-vc` Wiki
 
-This wiki documents the experimental dual-screen Android Auto video path for
-Harman MHI2.5 High units. It is written for the verified Volkswagen profile
-`MHI2_ER_VWG13_P4521_MU1367`; other firmware must be treated as unverified
-until its symbols, offsets, and display routing have been checked.
+This wiki provides comprehensive technical documentation, architectural specifications, deployment runbooks, and troubleshooting guides for running native dual-screen Android Auto projection on Harman MIB2.5 High (MHI2) head units.
 
-## Start here
+---
 
-1. Read [Compatibility Matrix](Compatibility-Matrix.md).
-2. Read [Installation and Safety Guide](Installation-and-Safety-Guide.md).
-3. Follow [Build Environment](Build-Environment.md) to produce the native hook
-   and `stream-player`.
-4. Use [Architecture Deep Dive](Architecture-Deep-Dive.md) for the native path.
-5. Read [Development Story](Development-Story.md) for the chronological
-   hypothesis → test → evidence → design-change narrative.
-6. Use [Engineering Reference](Engineering-Reference.md) for current geometry,
-   lifecycle, and Exit-flow behavior.
-7. Use [Test Methodology](Test-Methodology.md) before changing protocol,
-   geometry, focus, or HMI behavior.
-8. Read [Design Decisions and Lessons](Design-Decisions.md) for the important
-   non-obvious constraints behind the implementation.
-9. Consult [Configuration Reference](Configuration-Reference.md) before editing
-   a runtime key.
-10. Run [Troubleshooting and Diagnostics](Troubleshooting-and-Diagnostics.md)
-   before changing code or firmware.
+### 🧩 Ecosystem & Referenced Projects
 
-## System boundary
+This project focuses on the **native C preload hook and hardware video streaming pipeline**. It is designed to work in synergy with established projects:
 
-```text
-Android phone → Android Auto USB → MIB2 gal → libgal_hook.so
-                                      │
-                                      └→ TCP loopback → stream-player
-                                          ├→ MOST150 / Displayable 3 / Context 70
-                                          └← /tmp/gal_ack.sock (paced ACK)
-```
+* 📺 **[VcMOSTRenderMqb](https://github.com/andrewleech/VcMOSTRenderMqb)** *(by [@andrewleech](https://github.com/andrewleech))* — Pioneer MOST150 video transmission and Tegra 3 OpenKODE/GLES2 rendering foundation.
+* 🧭 **[NavActiveIgnore](https://github.com/jille/mib2-navignore)** (`navignore` *(by [@jille](https://github.com/jille) / [M.I.B.](https://github.com/Mr-MIBoner/M.I.B._More-Incredible-Bash))* — Baseline vehicle Java HMI patch to suppress mutual exclusion lockouts between factory maps and Android Auto.
+* 🎮 **[mib2-android-auto-vc](https://github.com/chopinwong01/mib2-android-auto-vc)** *(by [@chopinwong01](https://github.com/chopinwong01))* — Companion Java HMI patch (`VCAndroidAuto_mapmode.jar`) for MFL steering wheel zoom and cluster D-pad controls.
+* 🛠️ **[MIB SDK](https://gitlab.com/andrewleech/mibsdk)** *(by [@andrewleech](https://github.com/andrewleech))* — Official Dockerized QNX 6.5.0 SP1 cross-toolchain.
 
-The native project owns the GAL hook, secondary sink, transport, backpressure,
-renderer, and player supervision. The Java HMI layer is separate; see
-[Companion HMI Integration](Companion-HMI-Integration.md).
+---
 
-## Safety
+> [!CAUTION]
+> **CRITICAL WARNING — RISK OF HEAD UNIT DAMAGE OR BRICKING:**  
+> This software interacts directly with low-level QNX RTOS services, hardware graphics controllers, and vehicle bus gateways.  
+> * **Software Risk:** Improper configuration, exceeding supervisor environment limits (Rule of 10), or deploying incompatible Java bytecode will cause bootloops, supervisor crashes, or complete loss of the vehicle's infotainment UI (black screen).  
+> * **Hardware / System Risk:** Flash memory corruption, overheating from unthrottled decoding workloads, or bus desync can permanently disable the MMX unit (requiring bench flashing / hardware recovery).  
+> * **Development Disclosure ("Vibe Coded"):** This project was heavily "vibe coded" and iteratively developed with various Large Language Models (LLMs)—including **Google Gemini**, **Anthropic Claude**, and **OpenAI GPT**. While rigorously bench-tested and telemetry-audited on real vehicle hardware, AI-assisted low-level code inherently demands thorough review before deployment.  
+> **Never modify files in `/lib` or `/usr/lib`. Proceed strictly at your own risk.**
 
-Keep a verified recovery path and backups before deployment. Never replace
-files in `/lib` or `/usr/lib`. Custom libraries belong under `/mnt/app/eso/`,
-and the supervisor environment array must remain within the MIB2 limit of ten
-entries.
+---
 
-## Related work
+## 📚 Wiki Contents
 
-Thanks to these related projects and their maintainers:
+1. **[Hardware & Firmware Compatibility Matrix](Compatibility-Matrix.md)**
+   * Supported SoCs (Tegra 3 vs i.MX6)
+   * Tested train versions (`MHI2_ER_VWG13_P4521_MU1367`)
+   * MOST150 optical bus & Virtual Cockpit screen specifications
+2. **[Installation & Safety Runbook](Installation-and-Safety-Guide.md)**
+   * Safe deployment via SD Card
+   * The OEM Read-Only Safety Rule (never touch `/lib`)
+   * The Supervisor Environment Variable Limit ("Rule of 10")
+   * Step-by-step installation with `enable_hook.sh` and clean uninstallation
+3. **[Architecture Deep-Dive](Architecture-Deep-Dive.md)**
+   * Google Automotive Link (`gal`) internal structure
+   * Dynamic heap injection of `ProtocolEndpointBase` & focus controller (`focus_ctl`)
+   * Unix domain socket transport (`/tmp/gal_video.sock`) with helper init guard
+   * Low-delay zero-frame-delay flow control vs 3.3 FPS deadlock failure
+   * Tegra 3 `glDrawTextureNV` hardware blitter
+4. **[Companion HMI Integration](Companion-HMI-Integration.md)**
+   * Baseline requirement: `NavActiveIgnore` (suppressing factory map lockouts)
+   * Full HMI features: `VCAndroidAuto_mapmode.jar` / `mib2-android-auto-vc`
+   * IBM J9 VM compiler requirements (avoiding `VerifyError` bootloops)
+   * MFL steering wheel zoom routing
+5. **[Troubleshooting & Diagnostics](Troubleshooting-and-Diagnostics.md)**
+   * Diagnostic inspection with `hook_status.sh`
+   * Telemetry benchmarks (27.89 FPS, 0 drops, 38.9% idle headroom)
+   * Resolving `FF_THREAD_FRAME` phone credit deadlocks, early IDR drops, and socket unlinks
+6. **[Build Environment & Toolchain](Build-Environment.md)**
+   * Setting up the Docker MIB SDK
+   * Cross-compiling `libgal_hook.so`
+   * Compiling `stream-player` with minimal FFmpeg
 
-- [VcMOSTRenderMqb](https://github.com/OneB1t/VcMOSTRenderMqb) — MOST150
-  and Tegra/OpenKODE rendering foundation.
-- [MHI2_navignore](https://github.com/harman-f/MHI2_navignore) — Java HMI
-  mutual-exclusion workaround.
-- [mib2-android-auto-vc](https://github.com/adi961/mib2-android-auto-vc)
-  — companion HMI patch.
-- [MIB SDK](https://gitlab.com/andrewleech/mibsdk) — QNX cross-compilation
-  toolchain.
+---
+
+## 🗺️ Roadmap & Implementation Status
+
+* [x] **Dynamic Secondary Video Focus & Mode Switch:**
+  * Implemented via `focus_ctl.c` / `focus_ctl.h`. Holds secondary sink in mode 2 (native) until `stream-player` connects, triggering an immediate native SPS/PPS + IDR keyframe from the phone.
+  * Verified Kombi map readiness check (`GAL_FOCUS_WAIT_KOMBI`).
+  * Seamless RVC transitions via 250ms socket buffer with live secondary sink.
+* [x] **Unix Domain Socket Migration:**
+  * Implemented via `unix:///tmp/gal_video.sock`.
+  * `HOOK_FIX_HELPER_INIT_GUARD` prevents child helper processes from running destructors and unlinking the socket file.
+* [x] **Zero Frame Delay Decoding Pipeline:**
+  * Replaced `FF_THREAD_FRAME` with `AV_CODEC_FLAG_LOW_DELAY` (`FF_THREAD_SLICE`) to eliminate the 3.3 FPS / 300ms phone credit timeout deadlock.
+* [ ] **Hardware NVSS / NvMedia Video Decoder Renderer:**
+  * Transition from software multi-threaded FFmpeg decoding to hardware video decoding via **NvSS / NvMedia** (`/dev/nvss`, Nvidia Tegra hardware video decoder), substantially cutting Cortex-A9 CPU utilization.
+* [x] ~~**GPS Sensor Uncertainty Hook (Tunnel Loss Prevention)**~~ *(Abandoned — Proven Dead-End)*:
+  * Artificially clamping accuracy corrupted Google Maps' Extended Kalman Filter ($R_k \to 0$), causing compass spinning and route flapping. Removed; vehicle's rock-solid Kombi / ESP dead-reckoning hardware passes through uncorrupted.
+
+---
+
+## ⚠️ Important Disclaimer
+This project is an experimental research endeavor intended strictly for personal study and educational exploration. Modifying automotive infotainment firmware carries inherent risks of permanent bricking or software instability. Always keep verified eMMC/NAND backups before modifying unit configurations.

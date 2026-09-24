@@ -1,6 +1,7 @@
 #include "vc_player_mgr.h"
 #include "gal_hook.h"
 #include "vc_stream_out.h"
+#include "focus_ctl.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -140,6 +141,22 @@ static int environment_flag(const char *name)
     return value != NULL && *value != '\0' && strcmp(value, "0") != 0 &&
            strcmp(value, "false") != 0 && strcmp(value, "no") != 0;
 }
+
+/* Read once in gal_hook_init, after the config file, so the controller
+ * thread never calls getenv while vc_player_start edits the environment. */
+static int g_fix_on[HOOK_FIX_COUNT];
+static int g_output_mode = GAL_OUTPUT_WITHHOLD;
+static int g_focus_mirror;
+static int g_focus_start_native = 1;
+static int g_focus_wait_kombi;
+
+int hook_fix_enabled(hook_fix fix)
+{
+    return (unsigned)fix < (unsigned)HOOK_FIX_COUNT ? g_fix_on[fix] : 0;
+}
+
+int gal_hook_focus_start_native(void) { return g_focus_start_native; }
+int gal_hook_focus_wait_kombi(void) { return g_focus_wait_kombi; }
 
 static void hook_vlog(const char *level, const char *format, va_list arguments)
 {
@@ -409,6 +426,37 @@ int gal_hook_init(const gal_secondary_config *config)
 
     /* Before anything reads the environment. */
     load_config_file();
+    value = getenv("GAL_DUALSCREEN_OUTPUT");
+    if (value == NULL || *value == '\0' || strcmp(value, "withhold") == 0) {
+        g_output_mode = GAL_OUTPUT_WITHHOLD;
+    } else if (strcmp(value, "gal") == 0) {
+        g_output_mode = GAL_OUTPUT_GAL;
+    } else {
+        gal_hook_logf("event=config.output result=unknown value=%s fallback=withhold", value);
+        g_output_mode = GAL_OUTPUT_WITHHOLD;
+    }
+    g_focus_mirror = environment_flag("GAL_DUALSCREEN_FOCUS_MIRROR");
+    g_fix_on[HOOK_FIX_HELPER_INIT_GUARD] =
+        environment_flag_default_on("GAL_FIX_HELPER_INIT_GUARD");
+    g_fix_on[HOOK_FIX_FOCUS_CONTROL] =
+        environment_flag_default_on("GAL_FOCUS_CONTROL") &&
+        g_output_mode == GAL_OUTPUT_WITHHOLD &&
+        environment_flag_default_on("GAL_STREAM_ENABLE");
+    g_fix_on[HOOK_FIX_ACK_RENDERED_ONLY] =
+        environment_flag_default_on("GAL_FIX_ACK_RENDERED_ONLY") &&
+        g_fix_on[HOOK_FIX_FOCUS_CONTROL];
+    g_fix_on[HOOK_FIX_NO_IDR_REPLAY] =
+        environment_flag_default_on("GAL_FIX_NO_IDR_REPLAY") &&
+        g_fix_on[HOOK_FIX_FOCUS_CONTROL];
+    g_fix_on[HOOK_FIX_STREAM_TIMING] =
+        environment_flag_default_on("GAL_FIX_STREAM_TIMING");
+    g_fix_on[HOOK_FIX_PLAYER_LOG] =
+        environment_flag_default_on("GAL_FIX_PLAYER_LOG");
+    g_fix_on[HOOK_FIX_ORPHAN_RESTORE] =
+        environment_flag_default_on("GAL_FIX_ORPHAN_RESTORE");
+    value = getenv("GAL_FOCUS_START");
+    g_focus_start_native = !(value != NULL && strcmp(value, "stock") == 0);
+    g_focus_wait_kombi = environment_flag_default_on("GAL_FOCUS_WAIT_KOMBI");
 
     if (config != NULL) {
         g_config = *config;
@@ -486,6 +534,17 @@ int gal_hook_init(const gal_secondary_config *config)
         g_config.viewing_distance, g_config.pixel_aspect_ratio_e4,
         g_config.displayable_id, g_config.vc_display, g_config.context_id,
         g_config.display_id, g_config.service_id == 0u ? "auto" : "fixed");
+    gal_hook_logf("event=fix.config helper_init_guard=%d focus_control=%d focus_start=%s focus_wait_kombi=%d ack_rendered_only=%d no_idr_replay=%d stream_timing=%d player_log=%d orphan_restore=%d output=%s",
+                  g_fix_on[HOOK_FIX_HELPER_INIT_GUARD],
+                  g_fix_on[HOOK_FIX_FOCUS_CONTROL],
+                  g_focus_start_native ? "native" : "stock",
+                  g_focus_wait_kombi,
+                  g_fix_on[HOOK_FIX_ACK_RENDERED_ONLY],
+                  g_fix_on[HOOK_FIX_NO_IDR_REPLAY],
+                  g_fix_on[HOOK_FIX_STREAM_TIMING],
+                  g_fix_on[HOOK_FIX_PLAYER_LOG],
+                  g_fix_on[HOOK_FIX_ORPHAN_RESTORE],
+                  gal_hook_output_mode_name());
     return 0;
 }
 
@@ -498,12 +557,7 @@ int gal_hook_cluster_input_enabled(void) { return g_cluster_input; }
 
 int gal_hook_output_mode(void)
 {
-    const char *value = getenv("GAL_DUALSCREEN_OUTPUT");
-    if (value == NULL || *value == '\0') return GAL_OUTPUT_WITHHOLD;
-    if (strcmp(value, "withhold") == 0) return GAL_OUTPUT_WITHHOLD;
-    if (strcmp(value, "gal") == 0) return GAL_OUTPUT_GAL;
-    gal_hook_logf("event=config.output result=unknown value=%s fallback=withhold", value);
-    return GAL_OUTPUT_WITHHOLD;
+    return g_output_mode;
 }
 
 /*
@@ -525,7 +579,7 @@ int gal_hook_main_input_id_enabled(void)
 
 int gal_hook_focus_mirror_enabled(void)
 {
-    return environment_flag("GAL_DUALSCREEN_FOCUS_MIRROR");
+    return g_focus_mirror;
 }
 
 int gal_hook_frame_ack_enabled(void)
@@ -540,17 +594,67 @@ const char *gal_hook_output_mode_name(void)
 int gal_hook_is_debug(void) { return g_debug; }
 const gal_secondary_config *gal_hook_config(void) { return &g_config; }
 
+static pid_t g_main_pid = 0;
+
+static void gal_hook_set_owner_pid(void)
+{
+    const char *owner = getenv("GAL_HOOK_OWNER_PID");
+    char value[32];
+    char *end = NULL;
+    long parsed;
+
+    if (owner != NULL && *owner != '\0') {
+        parsed = strtol(owner, &end, 10);
+        if (end != owner && *end == '\0' && parsed > 0) {
+            g_main_pid = (pid_t)parsed;
+            return;
+        }
+    }
+
+    g_main_pid = getpid();
+    (void)snprintf(value, sizeof(value), "%ld", (long)g_main_pid);
+    (void)setenv("GAL_HOOK_OWNER_PID", value, 1);
+}
+
 /* QNX loads shared objects without requiring a custom entry point. */
 __attribute__((constructor))
 static void gal_hook_constructor(void)
 {
+    if (g_main_pid == 0) gal_hook_set_owner_pid();
+    /*
+     * fix=helper_init_guard. Processes GAL spawns inherit LD_PRELOAD and
+     * GAL_HOOK_OWNER_PID; vc_player_start's system("slay ...") runs sh and
+     * slay with both. Each ran a full hook init and probed
+     * /tmp/gal_video.sock. On 2026-09-15 (t=170.018) sh's probe connected,
+     * slay's was refused, remove_stale_socket took that for a stale path, and
+     * slay unlinked and rebound it: every later player reached gal_ack.sock
+     * but never the video socket. Read straight from the environment, which
+     * already holds the values GAL applied from the config file.
+     */
+    if (getpid() != g_main_pid &&
+        environment_flag_default_on("GAL_FIX_HELPER_INIT_GUARD")) {
+        gal_hook_logf("event=init result=skipped reason=helper_process owner_pid=%ld fix=helper_init_guard",
+                      (long)g_main_pid);
+        return;
+    }
     (void)gal_hook_init(NULL);
 }
 
 __attribute__((destructor))
 static void gal_hook_destructor(void)
 {
-    vc_player_stop();
+    if (g_main_pid != 0 && getpid() != g_main_pid) {
+        /*
+         * Do not tear down sockets, player, or log file from a child process!
+         * When gal or smartphone_integrator spawns helper binaries or slay,
+         * their C runtimes invoke shared library destructors on exit.
+         */
+        return;
+    }
+    fc_shutdown();
+    /* gal is exiting: no pings left to answer, so let the player put the
+     * Kombi map back itself. */
+    vc_player_stop_wait(3000);
     vc_stream_out_close();
     if (g_log_fd >= 0) {
         close(g_log_fd);

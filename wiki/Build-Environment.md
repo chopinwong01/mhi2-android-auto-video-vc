@@ -1,54 +1,82 @@
-# Build Environment
+# Build Environment & Toolchain
 
-## Prerequisites
+All native binaries for Harman MHI2 are built using the QNX 6.5.0 SP1 cross-compilation toolchain encapsulated inside the official **MIB SDK** Docker container.
 
-- Docker capable of running the MIB SDK image.
-- Access to `registry.gitlab.com/andrewleech/mibsdk:latest`.
-- Network access the first time you build `player/`, so
-  `player/build_ffmpeg.sh` can fetch FFmpeg sources; the resulting
-  ffmpeg-mini static libs are cached under `player/build/` afterwards.
-- A clear deployment plan; never substitute host libraries for QNX libraries.
+---
 
-```sh
-docker pull registry.gitlab.com/andrewleech/mibsdk:latest
+## 1. Prerequisites
+
+* Docker installed on host (Linux, macOS, or Windows via WSL2).
+* Pull the MIB SDK image:
+  ```bash
+  docker pull registry.gitlab.com/andrewleech/mibsdk:latest
+  ```
+
+---
+
+## 2. Building the Preload Hook (`libgal_hook.so`)
+
+From the root of the repository:
+
+```bash
 make hook
-(cd player && make)
 ```
 
-`make hook` builds `libgal_hook.so` and `lib/libdmdt_flush.so` through the QNX
-ARM toolchain in Docker. The root Makefile provides `all`, `hook`, `shell`, and
-`clean`; it does not create a release package. If deployment expects
-`dist/sdcard_hook`, assemble that package through the corresponding packaging
-workflow before invoking the remote deployment helper.
+### Under the Hood
+The build target invokes Docker and runs:
+```sh
+arm-unknown-nto-qnx6.5.0eabi-gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
+    -I./src -DGAL_HOOK_BUILD="release" \
+    ./src/*.c \
+    -lsocket \
+    -o ./libgal_hook.so
+```
+* **Output:** `libgal_hook.so` (~60 KB).
 
-## Expected artifacts
+---
 
-| Artifact | Source | Role |
-|---|---|---|
-| `libgal_hook.so` | `make hook` | GAL preload hook. |
-| `lib/libdmdt_flush.so` | `make hook` | `_exit()` interposer that makes `dmdt` flush its output, so the player can read `dmdt gs` through a pipe. Goes in the package's `lib/`; see [where the libraries go](Installation-and-Safety-Guide.md#where-the-libraries-go). |
-| `player/stream-player` | `player/Makefile` | FFmpeg/OpenKODE cluster renderer. |
-| `player/build/ffmpeg-mini/` | `player/build_ffmpeg.sh` (auto-run by `player/Makefile`) | Static libavcodec/libavformat/libavutil for QNX ARMv7. |
-| `player/config.txt` | Repository | Player defaults and stream URL. |
-| `scripts/*.sh` | Repository | Install, rollback, diagnostics, deployment helpers. |
-| `gal_dualscreen.conf` | Derived from example | Runtime configuration outside the supervisor budget. |
+## 3. Building the Stream Player (`stream-player`)
 
-## Build and package checks
+`stream-player` links against minimal static FFmpeg libraries (`libavcodec.a`, `libavformat.a`, `libavutil.a`) and QNX EGL/GLES2 graphics libraries:
 
-Verify the results are QNX ARM artifacts, inspect dependencies in the SDK
-environment, and keep the hook and player from the same source revision. A
-host-side build does not validate the target GAL ABI, DMDT routing, or Android
-Auto discovery.
+```bash
+cd player
+make
+```
 
-Use `scripts/gal_dualscreen.conf.example` as the complete configuration
-reference. File configuration exists because `smartphone_integrator` has an
-approximately ten-entry environment limit. Values injected by `enable_hook.sh`
-override file values; record both when reproducing a test.
+### Manual Docker Build Command
+If building outside the Makefile:
+```bash
+docker run --rm -v $(pwd)/../..:/work -w /work/mhi2-android-auto-video-vc/player \
+  registry.gitlab.com/andrewleech/mibsdk:latest sh -c '
+    . /etc/qnx/env
+    qcc -Vgcc_ntoarmv7 -c -O2 -Wc,-Wall -I/work/VcMOSTRenderMqb/build/ffmpeg-mini -DNDEBUG \
+        -I. -I/usr/qnx650/target/qnx6/usr/include \
+        -EL -DVARIANT_le -DVARIANT_v7 -DBUILDENV_qss \
+        opengl_gpu.cc -o opengl_gpu.o
+    qcc -V4.4.2,gcc_ntoarmv7le opengl_gpu.o \
+        -L/usr/qnx650/target/qnx6/armle-v7/lib -L/usr/qnx650/target/qnx6/armle-v7/usr/lib \
+        -Wl,--start-group \
+        /work/VcMOSTRenderMqb/build/ffmpeg-mini/libavformat/libavformat.a \
+        /work/VcMOSTRenderMqb/build/ffmpeg-mini/libavcodec/libavcodec.a \
+        /work/VcMOSTRenderMqb/build/ffmpeg-mini/libavutil/libavutil.a \
+        -Bstatic -lbz2 -lz -lcpp -Bdynamic \
+        -Wl,--end-group \
+        -lEGL -lGLESv2 -lsocket -lm -lc \
+        -o stream-player
+    ntoarmv7-strip -s stream-player
+'
+```
+* **Output:** `player/stream-player` (~4.5 MB stripped executable).
 
-## Remote deployment helper
+---
 
-`scripts/deploy_to_car.sh [IP] [--with-jars]` requires an existing
-`dist/sdcard_hook` directory. It stops running GAL/player processes, copies the
-package to `/fs/sdb0`, invokes `enable_hook.sh`, and requires a later reboot.
-It skips JAR updates unless `--with-jars` is supplied. It is a development
-convenience, not evidence that a package is safe for another firmware train.
+## 4. Network Deployment to the Car (`scripts/deploy_to_car.sh`)
+
+If your car's head unit is connected via Ethernet (D-Link DUB-E100 adapter):
+
+```bash
+sh scripts/deploy_to_car.sh 10.81.225.46
+```
+
+The script transfers `libgal_hook.so` and `stream-player` directly to `/mnt/app/eso/lib/gal_dualscreen` and `/mnt/app/eso/bin/` over SCP, installs the configuration, and prompts you to reboot the head unit.

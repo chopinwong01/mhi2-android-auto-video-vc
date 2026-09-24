@@ -3,12 +3,13 @@
  *
  * The old GAL executable is a fixed-address ARM ET_EXEC image.  This hook
  * creates a second VideoSink and a second CVideoSinkCallbackHandler. Secondary
- * frames are ACKed in-hook and forwarded as raw H.264 Annex-B over TCP to an
- * external stream-player process (127.0.0.1:12346) for decode and display.
+ * frames are ACKed in-hook and forwarded as raw H.264 Annex-B over a Unix
+ * socket to an external stream-player process for decode and display.
  */
 #include "gal_hook.h"
 #include "vc_stream_out.h"
 #include "vc_player_mgr.h"
+#include "focus_ctl.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -116,6 +117,7 @@ static config_count_fn g_config_count;
 typedef int (*channel_open_fn)(void *, unsigned char, const void *);
 static channel_open_fn g_handle_channel_open;
 static unsigned long g_secondary_acks;
+static unsigned long g_undelivered_credits;  /* fix=ack_rendered_only */
 static unsigned long g_primary_frames;
 
 static void *g_primary_sink;
@@ -173,6 +175,15 @@ static uintptr_t g_resolved_impl_vtable;
 static uintptr_t g_resolved_cbhandler_vtable;
 static int g_firmware_check_attempted;
 static int g_firmware_verified;
+
+static void on_frames_rendered(unsigned count);
+
+/* Focus-control writes, which call the stock function past this hook. */
+static void fc_write_focus(void *sink, int mode, int unconstrained)
+{
+    g_secondary_focus_mode = mode;
+    g_set_video_focus(sink, mode, unconstrained);
+}
 
 static uint32_t load_u32(const void *base, size_t offset)
 {
@@ -739,7 +750,17 @@ static int build_secondary_sink(void *primary, void *controller)
         config->width, config->height, config->fps, config->dpi,
         0, 0,
         config->viewing_distance);
-    if (g_secondary_registered) return 0;
+    if (g_secondary_registered) {
+        (void)resolve_symbol("_ZN9VideoSink13setVideoFocusEib",
+                             (void **)&g_set_video_focus);
+        if (hook_fix_enabled(HOOK_FIX_FOCUS_CONTROL) && g_set_video_focus != NULL) {
+            fc_ops ops;
+            ops.set_focus = fc_write_focus;
+            ops.frames_rendered = on_frames_rendered;
+            fc_start(g_secondary_sink, &ops);
+        }
+        return 0;
+    }
     /*
      * registerService rejected the endpoint. Deliberately NOT freed: whether
      * the router stored the pointer before failing is a reverse-engineered
@@ -1134,8 +1155,15 @@ void _ZN9VideoSink13setVideoFocusEib(void *sink, int mode, int unconstrained)
     (void)resolve_symbol("_ZN9VideoSink13setVideoFocusEib", (void **)&g_set_video_focus);
     if (g_set_video_focus == NULL) return;
 
-    gal_hook_logf("event=aap.video_focus role=%s sink=%p mode=%d unconstrained=%d",
-                  sink == g_secondary_sink ? "secondary" : "primary", sink, mode, unconstrained);
+    if (sink == g_secondary_sink && fc_enabled()) {
+        int requested = mode;
+        int held = fc_filter_focus(sink, &mode);
+        gal_hook_logf("event=aap.video_focus role=secondary sink=%p mode=%d requested_mode=%d unconstrained=%d action=%s fix=focus_control",
+                      sink, mode, requested, unconstrained, held ? "hold_native" : "pass");
+    } else {
+        gal_hook_logf("event=aap.video_focus role=%s sink=%p mode=%d unconstrained=%d",
+                      sink == g_secondary_sink ? "secondary" : "primary", sink, mode, unconstrained);
+    }
 
     if (sink == g_secondary_sink) g_secondary_focus_mode = mode;
 
@@ -1176,15 +1204,16 @@ void _ZN9VideoSink13setVideoFocusEib(void *sink, int mode, int unconstrained)
      * reproduced for comparison: GAL_DUALSCREEN_FOCUS_MIRROR=1.
      */
     if (sink != g_secondary_sink && g_secondary_registered &&
-        gal_hook_focus_mirror_enabled()) {
+        gal_hook_focus_mirror_enabled() && !fc_enabled()) {
         g_secondary_focus_mode = mode;
         gal_hook_logf("event=aap.video_focus role=secondary_synced sink=%p mode=%d unconstrained=%d",
                       g_secondary_sink, mode, unconstrained);
         g_set_video_focus(g_secondary_sink, mode, unconstrained);
     } else if (sink != g_secondary_sink && g_secondary_registered) {
         gal_hook_logf("event=aap.video_focus role=secondary_synced action=skipped "
-                      "primary_mode=%d reason=mirror_disabled secondary_keeps=%d",
-                      mode, g_secondary_focus_mode);
+                      "primary_mode=%d reason=%s secondary_keeps=%d",
+                      mode, fc_enabled() ? "focus_control" : "mirror_disabled",
+                      g_secondary_focus_mode);
     }
 }
 
@@ -1242,6 +1271,16 @@ int _ZN9VideoSink23handleVideoFocusRequestERK29VideoFocusRequestNotification(
         return g_handle_video_focus_request(sink, request);
     }
 
+    if (fc_enabled()) {
+        int reply = fc_request_reply(sink, mode);
+        if (reply >= 0) {
+            gal_hook_logf(
+                "event=aap.video_focus_request role=secondary sink=%p mode=%d reason=%d reply=%d focus_state=%s action=local_ack fix=focus_control",
+                sink, mode, reason, reply, fc_state_name());
+            g_secondary_focus_mode = reply;
+            return 1;
+        }
+    }
     gal_hook_logf(
         "event=aap.video_focus_request role=secondary sink=%p mode=%d reason=%d previous=%d action=local_ack isolation=preserve_primary_lsd_state",
         sink, mode, reason, g_secondary_focus_mode);
@@ -1267,7 +1306,9 @@ int _ZN9VideoSink11handleSetupEi(void *sink, int type)
      * handleVideoFocusRequest interposer above because the LSD callback has no
      * display identifier.
      */
+    if (sink == g_secondary_sink) fc_setup_begin(sink);
     result = g_handle_setup(sink, type);
+    if (sink == g_secondary_sink) fc_setup_end(sink);
     gal_hook_logf("event=aap.setup.complete role=%s result=%d service=%u",
                   sink == g_secondary_sink ? "secondary" : "primary",
                   result, endpoint_service_id(sink));
@@ -1327,7 +1368,7 @@ static void *ack_poll_thread(void *arg)
     gal_hook_log("event=ack.thread result=started");
     while (g_ack_thread_running) {
         vc_stream_out_poll_ack(on_frames_rendered);
-        if (++tick_counter >= 100) { /* 100 * 5ms = 500ms */
+        if (++tick_counter >= 25) { /* 25 * 20ms = 500ms */
             struct timespec now;
             long frame_silence_ms;
             long ack_silence_ms;
@@ -1339,7 +1380,7 @@ static void *ack_poll_thread(void *arg)
                              (now.tv_nsec - g_last_real_ack_rx_time.tv_nsec) / 1000000;
             vc_player_supervisor_tick(frame_silence_ms, ack_silence_ms);
         }
-        usleep(5000); /* 5ms poll interval = 200 Hz */
+        usleep(20000); /* 20ms poll interval = 50 Hz */
     }
     gal_hook_log("event=ack.thread result=stopped");
     return NULL;
@@ -1369,7 +1410,7 @@ void _ZN9VideoSink13playbackStartEi(void *sink, int session)
          * session, so treat "already started" as the tail of an abrupt
          * disconnect and tear the old one down first.
          */
-        if (g_secondary_started) {
+        if (g_secondary_started && !fc_enabled()) {
             gal_hook_logf("event=aap.playback action=start role=secondary note=previous_session_never_stopped action_taken=cleanup frames=%lu acks=%lu",
                           g_secondary_frames, g_secondary_acks);
             g_secondary_started = 0;
@@ -1377,8 +1418,15 @@ void _ZN9VideoSink13playbackStartEi(void *sink, int session)
             vc_stream_out_begin_stream();
         }
 
-        if (!g_ack_thread_running) {
+        if (!g_ack_thread_running && !fc_enabled()) {
             clock_gettime(CLOCK_MONOTONIC, &g_last_ack_rx_time);
+            /*
+             * Give a newly spawned player the full supervisor grace period
+             * before its first real render ACK. Leaving this timestamp zero
+             * makes the first tick interpret system uptime as ACK silence and
+             * immediately kill the player.
+             */
+            g_last_real_ack_rx_time = g_last_ack_rx_time;
             clock_gettime(CLOCK_MONOTONIC, &g_last_frame_rx_time);
             g_ack_thread_running = 1;
             pthread_create(&g_ack_thread, NULL, ack_poll_thread, NULL);
@@ -1432,7 +1480,10 @@ void _ZN9VideoSink13playbackStartEi(void *sink, int session)
              * handleDataAvailable; only GAL's render step is withheld.
              */
             g_secondary_started = 1;
-            vc_player_start();
+            if (fc_enabled())
+                fc_playback_start(sink);   /* the controller owns the player */
+            else
+                vc_player_start();
             gal_hook_logf("event=aap.playback action=start role=secondary result=withheld reason=shared_renderer service=%u session=%d",
                           endpoint_service_id(sink), session);
             return;
@@ -1456,6 +1507,20 @@ void _ZN9VideoSink12playbackStopEi(void *sink, int session)
                   sink == g_secondary_sink ? g_secondary_frames : 0ul,
                   sink == g_secondary_sink ? g_secondary_bytes : 0ul);
     g_playback_stop(sink, session);
+    if (sink == g_secondary_sink && fc_enabled()) {
+        /*
+         * fix=focus_control. A stop that follows our own mode 2 keeps the
+         * player and its sockets for the next grant; the controller handles
+         * any other stop. Nothing here waits on gal's reader thread.
+         */
+        int ours = fc_playback_stop(sink);
+        gal_hook_logf("event=aap.playback action=stop role=secondary ours=%d focus_state=%s player=controller fix=focus_control",
+                      ours, fc_state_name());
+        g_secondary_started = 0;
+        memset(&g_secondary_start_time, 0, sizeof(g_secondary_start_time));
+        g_secondary_no_frame_warned = 0;
+        return;
+    }
     if (sink == g_secondary_sink) {
         if (g_ack_thread_running) {
             g_ack_thread_running = 0;
@@ -1605,7 +1670,10 @@ static void ack_secondary_frame(void *sink)
          * from the return value: 0 means either gate-off or the send call
          * returning 0, which are different things.
          */
-        int rc = g_ack_frames(sink, session, 1u);
+        int rc;
+        fc_write_lock();
+        rc = g_ack_frames(sink, session, 1u);
+        fc_write_unlock();
         ++g_secondary_acks;
         if (g_secondary_acks <= 3ul || g_secondary_acks % 300ul == 0ul)
             gal_hook_logf("event=own.ack count=%lu session=%d rc=%d "
@@ -1614,6 +1682,36 @@ static void ack_secondary_frame(void *sink)
                           (unsigned)load_u8(sink, 0x04),
                           (unsigned)load_u8(sink, 0x05));
     }
+}
+
+/* fix=stream_timing: one line per 30 secondary frames. */
+static void log_stream_timing(void)
+{
+    static struct timespec last;
+    struct timespec now;
+    unsigned long avg_us;
+    unsigned long max_us;
+    unsigned long eagain;
+    unsigned long sends;
+    unsigned acked = 0u;
+    unsigned ack_avg = 0u;
+    unsigned ack_max = 0u;
+    unsigned unacked = 0u;
+    long window_ms = 0;
+
+    sends = vc_stream_out_take_timing(&avg_us, &max_us, &eagain);
+    if (fc_enabled()) acked = fc_take_latency(&ack_avg, &ack_max, &unacked);
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (last.tv_sec != 0)
+        window_ms = (long)(now.tv_sec - last.tv_sec) * 1000L +
+                    (now.tv_nsec - last.tv_nsec) / 1000000L;
+    last = now;
+    gal_hook_logf("event=stream.timing frames=%lu window_ms=%ld input_fps=%.1f ack_fps=%.1f sends=%lu send_us_avg=%lu send_us_max=%lu eagain=%lu acked=%u ack_ms_avg=%u ack_ms_max=%u unacked=%u focus_state=%s fix=stream_timing",
+                  g_secondary_frames, window_ms,
+                  window_ms > 0 ? 30000.0 / (double)window_ms : 0.0,
+                  window_ms > 0 ? (double)acked * 1000.0 / (double)window_ms : 0.0,
+                  sends, avg_us, max_us, eagain, acked, ack_avg, ack_max, unacked,
+                  fc_enabled() ? fc_state_name() : "off");
 }
 
 void _ZN9VideoSink17handleCodecConfigEPvj(void *sink, void *data,
@@ -1722,7 +1820,32 @@ void _ZN9VideoSink19handleDataAvailableEyRK10shared_ptrI8IoBufferEj(
              * reader is absent or behind, which is not the phone's problem.
              * vc_stream_out accounts for what it discarded.
              */
-            (void)vc_stream_out_write(payload, payload_bytes);
+            if (fc_enabled()) {
+                int delivered = 0;
+                (void)vc_stream_out_write_ex(payload, payload_bytes, &delivered);
+                if (delivered) {
+                    fc_frame_delivered();
+                } else if (hook_fix_enabled(HOOK_FIX_ACK_RENDERED_ONLY)) {
+                    /*
+                     * Not delivered -- no player connected, held back until a
+                     * keyframe, or the write failed -- so no render ACK will
+                     * ever come for it. Return the phone's credit now: it
+                     * never forgets an unACKed frame, and on the car the
+                     * frames lost across one player replacement closed its
+                     * window to a single slot for the rest of the session.
+                     */
+                    ++g_undelivered_credits;
+                    if (g_undelivered_credits <= 5ul || g_undelivered_credits % 100ul == 0ul)
+                        gal_hook_logf("event=ack.credit_returned count=1 total=%lu reason=undelivered fix=ack_rendered_only",
+                                      g_undelivered_credits);
+                    ack_secondary_frame(sink);
+                }
+            } else {
+                (void)vc_stream_out_write(payload, payload_bytes);
+            }
+            if (hook_fix_enabled(HOOK_FIX_STREAM_TIMING) &&
+                g_secondary_frames % 30ul == 0ul)
+                log_stream_timing();
 
             /*
              * Check once per second. The stream gate withholds delta frames
@@ -1730,7 +1853,7 @@ void _ZN9VideoSink19handleDataAvailableEyRK10shared_ptrI8IoBufferEj(
              * waits for both decoded frames and a ready Kombi map window. It
              * has no forced display-switch timeout.
              */
-            if (g_secondary_started && (g_secondary_frames % 30ul == 0ul)) {
+            if (!fc_enabled() && g_secondary_started && (g_secondary_frames % 30ul == 0ul)) {
                 if (!vc_player_is_running()) {
                     vc_player_start();
                 }
@@ -1746,7 +1869,9 @@ void _ZN9VideoSink19handleDataAvailableEyRK10shared_ptrI8IoBufferEj(
          * dispatch immediate fallback ACK so the AAP session never hangs or disconnects.
          */
         int ack_client = vc_stream_out_ack_client_connected();
-        if (!ack_client) {
+        if (fc_enabled() && hook_fix_enabled(HOOK_FIX_ACK_RENDERED_ONLY)) {
+            /* fix=ack_rendered_only: the focus controller ACKs rendered frames. */
+        } else if (!ack_client) {
             ack_secondary_frame(sink);
         } else {
             struct timespec now;
@@ -1957,9 +2082,11 @@ void _ZN13MessageRouter12routeMessageEhRK10shared_ptrI8IoBufferE(
          * C++ endpoint object in router->table[service + 0x40], swallow safely
          * rather than delegating to g_route_message which would dereference NULL.
          */
+        fc_run_mailbox();
         return;
     }
     if (g_route_message != NULL) g_route_message(router, channel, buffer);
+    fc_run_mailbox();
 }
 
 /* Diagnostic only: log stock/secondary VideoConfiguration registrations. */

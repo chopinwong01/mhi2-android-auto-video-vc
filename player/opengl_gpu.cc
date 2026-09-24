@@ -56,8 +56,21 @@ extern "C" {
 // ---------------- Configuration & Performance Knobs ----------------
 static const int kBufferPoolSize    = 16;     // 16-slot frame pool for jitter smoothing & zero contention
 static int   g_ffmpegThreadCount    = 2;      // Default: 2 worker threads for multi-core Tegra 3
-static int   g_ffmpegThreadType     = FF_THREAD_FRAME; // Default: true multi-core parallel frame decode
-static bool  g_ffmpegLowDelay       = false;  // false allows FF_THREAD_FRAME (+33ms 1-frame latency)
+/*
+ * Zero frame delay by default. Frame threading holds each decoded frame until
+ * the next packet arrives, and the render ACK the phone is waiting for only
+ * comes after that frame is shown. When the phone is short of window credit it
+ * sends the next packet only after that ACK, so every frame waits for a
+ * phone-side timeout of about 300 ms: 3.3 fps with 313 ms ACK latency, seen on
+ * the car 2026-09-16 (run 3). AV_CODEC_FLAG_LOW_DELAY makes FFmpeg skip frame
+ * threading altogether; slice threading is declared too so the startup log
+ * does not claim otherwise. Decode at 800x480 measured about 1 ms a frame, so
+ * frame-parallel decode bought nothing. Not configurable: this is a fix, and
+ * the old GAL_PLAYER_THREAD_TYPE / GAL_PLAYER_LOW_DELAY knobs (conf, env and
+ * --thread-type / --low-delay flags) could only put the stall back.
+ */
+static const int  g_ffmpegThreadType = FF_THREAD_SLICE;
+static const bool g_ffmpegLowDelay   = true;
 static bool  g_ffmpegFastDecode     = true;
 static int   g_ffmpegSkipFrame      = AVDISCARD_DEFAULT;
 static int   g_ffmpegSkipLoopFilter = AVDISCARD_NONREF; // Default: noref eliminates macroblock prediction blur during movement
@@ -190,7 +203,7 @@ static volatile int g_streamSock = -1;
 static volatile bool g_newFrameReady = false;
 static uint64_t g_decodedFrameCount = 0;
 static uint64_t g_lastDecodeDurationUs = 0;
-static char g_videoSource[512] = "tcp://127.0.0.1:12346";
+static char g_videoSource[512] = "unix:///tmp/gal_video.sock";
 static bool g_isSocket = false;
 
 int windowWidth  = 800;
@@ -271,310 +284,95 @@ static const char* fragmentShaderSource =
     "    gl_FragColor = vec4(r, g, b, 1.0);\n"
     "}\n";
 
-// ---------------- 5x7 Bitmap Font ----------------
-struct Glyph5x7 { char c; uint8_t rows[7]; };
-static const Glyph5x7 FONT_5X7[] = {
-    { ' ',{0x00,0x00,0x00,0x00,0x00,0x00,0x00} },
-    { ':',{0x00,0x04,0x00,0x00,0x04,0x00,0x00} },
-    { '.',{0x00,0x00,0x00,0x00,0x00,0x04,0x00} },
-    { '(',{0x02,0x04,0x08,0x08,0x08,0x04,0x02} },
-    { ')',{0x08,0x04,0x02,0x02,0x02,0x04,0x08} },
-    { '%',{0x19,0x19,0x02,0x04,0x08,0x13,0x13} },
-    { '-',{0x00,0x00,0x00,0x1F,0x00,0x00,0x00} },
-    { '/',{0x01,0x02,0x04,0x08,0x10,0x00,0x00} },
-    { '0',{0x0E,0x11,0x13,0x15,0x19,0x11,0x0E} },
-    { '1',{0x04,0x0C,0x04,0x04,0x04,0x04,0x0E} },
-    { '2',{0x0E,0x11,0x01,0x02,0x04,0x08,0x1F} },
-    { '3',{0x1F,0x02,0x04,0x02,0x01,0x11,0x0E} },
-    { '4',{0x02,0x06,0x0A,0x12,0x1F,0x02,0x02} },
-    { '5',{0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E} },
-    { '6',{0x06,0x08,0x10,0x1E,0x11,0x11,0x0E} },
-    { '7',{0x1F,0x01,0x02,0x04,0x08,0x08,0x08} },
-    { '8',{0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E} },
-    { '9',{0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C} },
-    { 'A',{0x0E,0x11,0x11,0x1F,0x11,0x11,0x11} },
-    { 'B',{0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E} },
-    { 'C',{0x0E,0x11,0x10,0x10,0x10,0x11,0x0E} },
-    { 'D',{0x1C,0x12,0x11,0x11,0x11,0x12,0x1C} },
-    { 'E',{0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F} },
-    { 'F',{0x1F,0x10,0x10,0x1E,0x10,0x10,0x10} },
-    { 'G',{0x0E,0x11,0x10,0x17,0x11,0x11,0x0F} },
-    { 'H',{0x11,0x11,0x11,0x1F,0x11,0x11,0x11} },
-    { 'I',{0x0E,0x04,0x04,0x04,0x04,0x04,0x0E} },
-    { 'J',{0x07,0x02,0x02,0x02,0x02,0x12,0x0C} },
-    { 'K',{0x11,0x12,0x14,0x18,0x14,0x12,0x11} },
-    { 'L',{0x10,0x10,0x10,0x10,0x10,0x10,0x1F} },
-    { 'M',{0x11,0x1B,0x15,0x15,0x11,0x11,0x11} },
-    { 'N',{0x11,0x19,0x15,0x13,0x11,0x11,0x11} },
-    { 'O',{0x0E,0x11,0x11,0x11,0x11,0x11,0x0E} },
-    { 'P',{0x1E,0x11,0x11,0x1E,0x10,0x10,0x10} },
-    { 'Q',{0x0E,0x11,0x11,0x11,0x15,0x12,0x0D} },
-    { 'R',{0x1E,0x11,0x11,0x1E,0x14,0x12,0x11} },
-    { 'S',{0x0E,0x11,0x10,0x0E,0x01,0x11,0x0E} },
-    { 'T',{0x1F,0x04,0x04,0x04,0x04,0x04,0x04} },
-    { 'U',{0x11,0x11,0x11,0x11,0x11,0x11,0x0E} },
-    { 'V',{0x11,0x11,0x11,0x11,0x11,0x0A,0x04} },
-    { 'W',{0x11,0x11,0x11,0x15,0x15,0x1B,0x11} },
-    { 'X',{0x11,0x11,0x0A,0x04,0x0A,0x11,0x11} },
-    { 'Y',{0x11,0x11,0x0A,0x04,0x04,0x04,0x04} },
-    { 'Z',{0x1F,0x01,0x02,0x04,0x08,0x10,0x1F} },
-    { 'c',{0x00,0x00,0x0E,0x11,0x10,0x11,0x0E} },
-    { 'd',{0x01,0x01,0x0D,0x13,0x11,0x11,0x0F} },
-    { 'e',{0x0E,0x11,0x1F,0x10,0x10,0x11,0x0E} },
-    { 'm',{0x00,0x00,0x1A,0x15,0x15,0x11,0x11} },
-    { 'n',{0x00,0x00,0x16,0x19,0x11,0x11,0x11} },
-    { 'o',{0x00,0x00,0x0E,0x11,0x11,0x11,0x0E} },
-    { 'p',{0x00,0x00,0x1E,0x11,0x1E,0x10,0x10} },
-    { 'r',{0x00,0x00,0x16,0x19,0x10,0x10,0x10} },
-    { 's',{0x00,0x00,0x0E,0x10,0x0E,0x01,0x1E} },
-    { '\n',{0x00,0x00,0x00,0x00,0x00,0x00,0x00} }
-};
-
-static void draw_text_yuv(uint8_t* fb, int fbW, int fbH, int start_x, int start_y, const char* text, int dot_px) {
-    if (!text || !fb) return;
-
-    // Bright yellow in YUV (Y=226, U=17, V=153)
-    uint8_t colorY = 226, colorU = 17, colorV = 153;
-
-    uint8_t* planeY = fb;
-    uint8_t* planeU = fb + (fbW * fbH);
-    uint8_t* planeV = planeU + ((fbW / 2) * (fbH / 2));
-
-    int max_line_len = 0, cur_line_len = 0, line_count = 1;
-    for (const char* p = text; *p; ++p) {
-        if (*p == '\n') {
-            line_count++;
-            if (cur_line_len > max_line_len) max_line_len = cur_line_len;
-            cur_line_len = 0;
-        } else cur_line_len++;
-    }
-    if (cur_line_len > max_line_len) max_line_len = cur_line_len;
-
-    int box_w = max_line_len * 6 * dot_px + 8 * dot_px;
-    int box_h = line_count * 8 * dot_px + 6 * dot_px;
-    int bg_x0 = start_x - 4 * dot_px;
-    int bg_y0 = start_y - 3 * dot_px;
-
-    // Dark background plate (dim Y by 75%)
-    for (int y = bg_y0; y < bg_y0 + box_h; ++y) {
-        if (y < 0 || y >= fbH) continue;
-        for (int x = bg_x0; x < bg_x0 + box_w; ++x) {
-            if (x < 0 || x >= fbW) continue;
-            planeY[y * fbW + x] >>= 2;
-        }
-    }
-
-    int cur_x = start_x;
-    int cur_y = start_y;
-    for (const char* p = text; *p; ++p) {
-        char c = *p;
-        if (c == '\n') {
-            cur_x = start_x;
-            cur_y += 8 * dot_px;
-            continue;
-        }
-        const uint8_t* glyph = NULL;
-        for (size_t i = 0; i < sizeof(FONT_5X7)/sizeof(FONT_5X7[0]); ++i) {
-            if (FONT_5X7[i].c == c) {
-                glyph = FONT_5X7[i].rows;
-                break;
-            }
-        }
-        if (glyph) {
-            for (int r = 0; r < 7; ++r) {
-                uint8_t row = glyph[r];
-                for (int col = 0; col < 5; ++col) {
-                    if (row & (1 << (4 - col))) {
-                        int dr_x = cur_x + col * dot_px;
-                        int dr_y = cur_y + r * dot_px;
-                        for (int dy = 0; dy < dot_px; ++dy) {
-                            for (int dx = 0; dx < dot_px; ++dx) {
-                                int fx = dr_x + dx;
-                                int fy = dr_y + dy;
-                                if (fx >= 0 && fx < fbW && fy >= 0 && fy < fbH) {
-                                    planeY[fy * fbW + fx] = colorY;
-                                    planeU[(fy / 2) * (fbW / 2) + (fx / 2)] = colorU;
-                                    planeV[(fy / 2) * (fbW / 2) + (fx / 2)] = colorV;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        cur_x += 6 * dot_px;
-    }
-}
 // ---------------- QNX DMDT Context Switching ----------------
-#ifdef __QNX__
-struct Command { const char* command; const char* error_message; };
-static bool g_initialCmdsExecuted = false;
-static pthread_t g_sentinelThread;
-static volatile bool g_sentinelRunning = false;
-static volatile bool g_streamActive = false;
+/*
+ * The cluster shows this player when context 70 points at displayable 3 (and
+ * display 4 shows context 70); the stock Kombi map is displayable 33. Both
+ * are set with dmdt, a separate process that took about 0.3 s a run on the
+ * car. Android Auto allows 500 ms of video setup latency, on-screen
+ * transition included, and 50 ms of output latency (HUIG 1.3 p.36).
+ *
+ * So the switch starts the moment the decoder has the phone's first keyframe
+ * -- the hook grants the stream only once the Kombi map is ready, so nothing
+ * is probed or waited for here -- and runs on its own threads, both commands
+ * at once, while the render loop keeps drawing and ACKing. It used to wait
+ * for 30 decoded frames (1 s), probe `dmdt gs` for the Kombi map, then run
+ * the two commands one after the other on the render thread: about 2 s before
+ * the cluster changed, with render ACKs held back 0.3-1.25 s at the switch
+ * (car, 2026-09-16). Timestamps are CLOCK_MONOTONIC, the hook log's clock.
+ */
+#define T_ARGS(us) (unsigned long long)((us) / 1000000ULL), (unsigned long long)((us) / 1000ULL % 1000ULL)
 static pid_t g_parentPid = 0;
-static const uint64_t kMinDecodedFramesBeforeDisplaySwitch = 30;
+#ifdef __QNX__
+struct DmdtRun { const char* args; int status; };
 
-void execute_initial_commands(bool force = false);
-void check_and_reassert_context();
-void switch_context_to_factory();
-
-static bool kombi_map_ready() {
-    struct stat st;
-    if (stat("/dev/mlb/isoTX2", &st) != 0) return false;
-
-    FILE* fp = popen("LD_PRELOAD=/eso/lib/gal_dualscreen/libdmdt_flush.so:/mnt/app/eso/lib/gal_dualscreen/libdmdt_flush.so:/mnt/app/eso/lib/libdmdt_flush.so:/fs/sdb0/lib/libdmdt_flush.so:/fs/sda0/lib/libdmdt_flush.so "
-                     "LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production "
-                     "/eso/bin/apps/dmdt gs 2>/dev/null", "r");
-    if (!fp) return false;
-    char line[256];
-    bool ready = false;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "DISPLAYABLE_KOMBI_MAP_VIEW") ||
-            (strstr(line, "context 70") && strstr(line, "33")) ||
-            (strstr(line, "33") && strstr(line, "window"))) {
-            ready = true;
-            break;
-        }
-    }
-    pclose(fp);
-    return ready;
-}
-
-static void* sentinel_thread_func(void* arg) {
-    (void)arg;
-    LOG("sentinel: background watchdog thread started (monitoring parent PID %ld)", (long)g_parentPid);
-    while (g_running && g_sentinelRunning) {
-        for (int i = 0; i < 20 && g_running && g_sentinelRunning; ++i) {
-            usleep(100000); // 100ms intervals, 2.0s total
-            if (g_parentPid > 1) {
-                if (kill(g_parentPid, 0) != 0 || getppid() != g_parentPid) {
-                    LOG("sentinel: parent process (PID %ld) exited/changed! Triggering clean shutdown...", (long)g_parentPid);
-                    g_running = false;
-                    pthread_cond_broadcast(&g_frameCond);
-                    int s = g_streamSock;
-                    if (s >= 0) shutdown(s, SHUT_RDWR);
-                    break;
-                }
-            }
-        }
-        if (!g_running || !g_sentinelRunning) break;
-        check_and_reassert_context();
-    }
-    LOG("sentinel: background watchdog thread exiting");
+static void* dmdt_run_thread(void* arg) {
+    DmdtRun* run = (DmdtRun*)arg;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production /eso/bin/apps/dmdt %s 2>/dev/null",
+             run->args);
+    run->status = system(cmd);
     return NULL;
 }
 
-static void start_sentinel_thread() {
-    if (g_sentinelRunning) return;
-    g_sentinelRunning = true;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256 * 1024);
-    if (pthread_create(&g_sentinelThread, &attr, sentinel_thread_func, NULL) != 0) {
-        fprintf(stderr, "Failed to start sentinel thread\n");
-        g_sentinelRunning = false;
-    }
-    pthread_attr_destroy(&attr);
+/*
+ * Run the two dmdt commands sequentially: dc rewrites the context table,
+ * and sc commits the displayable to the MOST encoder. sc must not run before dc.
+ * Because display_switch_thread is already off the render thread, running
+ * them sequentially does not block rendering or hold back frame ACKs.
+ */
+static void dmdt_pair(const char* a, const char* b, const char* what) {
+    DmdtRun runs[2] = { { a, -1 }, { b, -1 } };
+    uint64_t start = now_us();
+    dmdt_run_thread(&runs[0]);
+    dmdt_run_thread(&runs[1]);
+    uint64_t end = now_us();
+    LOG("dmdt: %s t=%llu.%03llu took=%llums ('dmdt %s'=%d, 'dmdt %s'=%d)", what, T_ARGS(end),
+        (unsigned long long)((end - start) / 1000ULL), a, runs[0].status, b, runs[1].status);
 }
 
-static void stop_sentinel_thread() {
-    if (!g_sentinelRunning) return;
-    g_sentinelRunning = false;
-    pthread_join(g_sentinelThread, NULL);
+static pthread_mutex_t g_switchLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_switchThread;
+static bool g_switchStarted = false;   /* g_switchLock */
+static bool g_switchClosed = false;    /* g_switchLock: shutting down */
+
+static void* display_switch_thread(void* arg) {
+    (void)arg;
+    dmdt_pair("dc 70 3", "sc 4 70", "cluster switched to the player");
+    return NULL;
 }
 
-void switch_context_to_factory() {
-    LOG("dmdt: reverting display context to factory (context 33)");
-    system("LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production /eso/bin/apps/dmdt dc 70 33 2>/dev/null; "
-           "LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production /eso/bin/apps/dmdt sc 4 70 2>/dev/null");
+/* Decoder thread, at the phone's first keyframe; once per player. */
+static void request_display_switch() {
+    pthread_mutex_lock(&g_switchLock);
+    if (!g_switchStarted && !g_switchClosed) {
+        LOG("dmdt: switching the cluster at the first keyframe t=%llu.%03llu", T_ARGS(now_us()));
+        if (pthread_create(&g_switchThread, NULL, display_switch_thread, NULL) == 0)
+            g_switchStarted = true;
+        else
+            LOGE("dmdt: could not start the switch thread");
+    }
+    pthread_mutex_unlock(&g_switchLock);
 }
 
-void execute_initial_commands(bool force) {
-    if (g_initialCmdsExecuted && !force) return;
-    /* Decode off-screen first. Normally the IDR arrives while Kombi is still
-     * starting; if Kombi wins the race, this prevents exposing the first
-     * decoder frames or a connection that immediately fails. */
-    if (!g_initialCmdsExecuted &&
-        g_decodedFrameCount < kMinDecodedFramesBeforeDisplaySwitch) return;
-    static uint64_t lastReadyCheckUs = 0;
-    static unsigned deferredChecks = 0;
-    uint64_t now = now_us();
-    if (now - lastReadyCheckUs < 1000000ULL) return;
-    lastReadyCheckUs = now;
-    if (!kombi_map_ready()) {
-        ++deferredChecks;
-        if (deferredChecks == 1 || deferredChecks % 10 == 0)
-            LOG("dmdt: display switch deferred; Kombi map is not ready");
-        return;
-    }
-    deferredChecks = 0;
-    LOG("dmdt: activating display context (context 3)");
-    struct Command commands[] = {
-        { "LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production /eso/bin/apps/dmdt dc 70 3",  "Create display table with context 3 failed" },
-        { "LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production /eso/bin/apps/dmdt sc 4 70", "Set display 4 (VC) to display table 70 failed" }
-    };
-    bool all_ok = true;
-    for (size_t i = 0; i < sizeof(commands)/sizeof(commands[0]); ++i) {
-        int ret = system(commands[i].command);
-        if (ret != 0) {
-            fprintf(stderr, "%s: %d\n", commands[i].error_message, ret);
-            all_ok = false;
-        } else {
-            LOG("dmdt: '%s' ok", commands[i].command);
-        }
-    }
-    if (all_ok) {
-        g_initialCmdsExecuted = true;
-        start_sentinel_thread();
-    }
-}
-
-void check_and_reassert_context() {
-    if (!g_streamActive) return;
-    if (!g_initialCmdsExecuted) {
-        execute_initial_commands();
-        return;
-    }
-    /*
-     * Context 70 Sentinel Watchdog:
-     * When stream is actively flowing, periodically inspect whether Context 70
-     * has been clobbered by OEM system (e.g. vehicle ignition turned ON, map viewer startup, or user cluster view change).
-     * If dmdt gs reports "context 70 -> 33", automatically re-assert dc 70 3 and sc 4 70.
-     * Uses libdmdt_flush.so interposer so dmdt flushes stdout upon _exit().
-     */
-    FILE* fp = popen("LD_PRELOAD=/eso/lib/gal_dualscreen/libdmdt_flush.so:/mnt/app/eso/lib/gal_dualscreen/libdmdt_flush.so:/mnt/app/eso/lib/libdmdt_flush.so:/fs/sdb0/lib/libdmdt_flush.so:/fs/sda0/lib/libdmdt_flush.so "
-                     "LD_LIBRARY_PATH=/eso/lib:/lib:/usr/lib IPL_CONFIG_DIR=/etc/eso/production "
-                     "/eso/bin/apps/dmdt gs 2>/dev/null", "r");
-    if (!fp) return;
-    char buf[512];
-    bool clobbered = false;
-    while (fgets(buf, sizeof(buf), fp)) {
-        if (strstr(buf, "context 70") && strstr(buf, "33")) {
-            clobbered = true;
-            break;
-        }
-    }
-    pclose(fp);
-    if (clobbered && g_streamActive) {
-        LOGE("sentinel: Context 70 clobbered by OEM system (found stock 33)! Re-asserting dc 70 3 && sc 4 70...");
-        execute_initial_commands(true);
-    }
-}
-
-void execute_final_commands() {
-    stop_sentinel_thread();
-    switch_context_to_factory();
-    g_initialCmdsExecuted = false;
+/*
+ * Main thread, on the way out: let a switch in progress finish, then put the
+ * stock map back -- only if this player switched it. A player that never
+ * got a keyframe has nothing to undo, and runs no dmdt at all.
+ */
+static void execute_final_commands() {
+    pthread_mutex_lock(&g_switchLock);
+    bool started = g_switchStarted;
+    g_switchClosed = true;
+    pthread_mutex_unlock(&g_switchLock);
+    if (!started) return;
+    pthread_join(g_switchThread, NULL);
+    dmdt_pair("dc 70 33", "sc 4 70", "stock Kombi map restored");
 }
 #else
-static bool g_initialCmdsExecuted = false;
-static volatile bool g_streamActive = false;
-static pid_t g_parentPid = 0;
-void execute_initial_commands(bool force = false) { (void)force; }
-void execute_final_commands() {}
-void check_and_reassert_context() {}
-void switch_context_to_factory() {}
+static void request_display_switch() {}
+static void execute_final_commands() {}
 #endif
 
 static void crash_signal_handler(int sig) {
@@ -696,6 +494,24 @@ void InitGL() {
 }
 
 // ---------------- H.264 Video Decoder Thread ----------------
+/*
+ * The hook opens its socket before it starts the player, so the first connect
+ * succeeded for every player on the car. A retry is for the case where it
+ * does not: once a second, and only while gal is still our parent -- a player
+ * whose gal is gone has nobody to connect to.
+ */
+static bool connect_retry_allowed() {
+    if (!g_running) return false;
+    if (g_parentPid > 1 && getppid() != g_parentPid) {
+        LOG("socket: gal (pid %ld) is gone; exiting", (long)g_parentPid);
+        g_running = false;
+        pthread_cond_broadcast(&g_frameCond);
+        return false;
+    }
+    sleep(1);
+    return g_running;
+}
+
 static void* DecoderThreadFunc(void* arg) {
     (void)arg;
     LOG("decoder: background worker thread active");
@@ -782,6 +598,8 @@ static void* DecoderThreadFunc(void* arg) {
     }
 
     bool hasDecodedKeyframe = false;
+    bool hasRenderedWarmupFrame = false;
+    bool gotData = false;
 
     while (g_running) {
         int sock = -1;
@@ -798,18 +616,19 @@ static void* DecoderThreadFunc(void* arg) {
                 strncpy(serv_un.sun_path, unix_path, sizeof(serv_un.sun_path) - 1);
 
                 g_streamSock = sock;
-                struct timeval tv;
-                tv.tv_sec = 2; tv.tv_usec = 0;
-                setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv));
+                int rcv_buf = 2097152; // 2MB socket receive buffer for large I-frames
+                setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&rcv_buf, sizeof(rcv_buf));
 
                 LOG("socket: connecting to unix://%s...", unix_path);
                 if (connect(sock, (struct sockaddr*)&serv_un, sizeof(serv_un)) < 0) {
+                    g_streamSock = -1;
                     close(sock);
-                    usleep(200000);
+                    if (!connect_retry_allowed()) break;
                     continue;
                 }
                 LOG("socket: connected successfully to unix://%s!", unix_path);
                 hasDecodedKeyframe = false;
+                hasRenderedWarmupFrame = false;
             } else {
                 sock = socket(AF_INET, SOCK_STREAM, 0);
                 if (sock < 0) { usleep(100000); continue; }
@@ -827,18 +646,16 @@ static void* DecoderThreadFunc(void* arg) {
                 int rcv_buf = 2097152; // 2MB socket receive buffer
                 setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&rcv_buf, sizeof(rcv_buf));
 
-                struct timeval tv;
-                tv.tv_sec = 2; tv.tv_usec = 0;
-                setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv));
-
                 LOG("socket: connecting to %s:%d...", host, port);
                 if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+                    g_streamSock = -1;
                     close(sock);
-                    usleep(200000);
+                    if (!connect_retry_allowed()) break;
                     continue;
                 }
                 LOG("socket: connected successfully to %s:%d!", host, port);
                 hasDecodedKeyframe = false;
+                hasRenderedWarmupFrame = false;
             }
         } else {
             infile = fopen(g_videoSource, "rb");
@@ -853,17 +670,16 @@ static void* DecoderThreadFunc(void* arg) {
             if (is_socket) {
                 bytes_read = recv(sock, inbuf, 131072, 0);
                 if (bytes_read < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                        // SO_RCVTIMEO expired (idle pause / reverse gear) -- keep connection alive and wait!
-                        continue;
-                    }
-                    LOG("socket: recv error (errno=%d), connection reset", errno);
-                    hasDecodedKeyframe = false;
+                    if (errno == EINTR) continue;
+                    LOG("socket: recv error (errno=%d) t=%llu.%03llu", errno, T_ARGS(now_us()));
                     break;
                 } else if (bytes_read == 0) {
-                    LOG("socket: connection closed by server (EOF), will reconnect");
-                    hasDecodedKeyframe = false;
+                    LOG("socket: stream closed t=%llu.%03llu", T_ARGS(now_us()));
                     break;
+                }
+                if (!gotData) {
+                    gotData = true;
+                    LOG("socket: first data t=%llu.%03llu", T_ARGS(now_us()));
                 }
             } else {
                 bytes_read = fread(inbuf, 1, 32768, infile);
@@ -918,7 +734,24 @@ static void* DecoderThreadFunc(void* arg) {
                                 continue;
                             }
                             hasDecodedKeyframe = true;
-                            LOG("decoder: first IDR/I keyframe received (%dx%d)! Stream stabilized.", w, h);
+                            LOG("decoder: first IDR/I keyframe received (%dx%d) t=%llu.%03llu; warming up one frame.",
+                                w, h, T_ARGS(now_us()));
+                            request_display_switch();
+                        }
+
+                        /*
+                         * The first decoded IDR establishes codec/reference
+                         * state but can still contain stale macroblocks when
+                         * a client joins in the middle of an AA session. Keep
+                         * the pre-filled black frame visible for one decoded
+                         * frame, then publish the next frame once the decoder
+                         * has had a clean reference to work from.
+                         */
+                        if (!hasRenderedWarmupFrame) {
+                            hasRenderedWarmupFrame = true;
+                            av_frame_unref(frame);
+                            LOG("decoder: warmup frame consumed; rendering next decoded frame.");
+                            continue;
                         }
 
                         // Direct memcpy to contiguous YUV buffer
@@ -975,8 +808,21 @@ static void* DecoderThreadFunc(void* arg) {
 
         if (sock >= 0) { g_streamSock = -1; close(sock); sock = -1; }
         if (infile) { fclose(infile); infile = NULL; }
+        if (is_socket) {
+            /*
+             * No reconnect. The hook never closes a working player's stream:
+             * a closed stream is gal exiting or replacing this player, and on
+             * the car every one of them was (6 of 6 on 2026-09-16; the
+             * reconnect attempt that followed always failed). Ending here is
+             * also how the player notices gal is gone, without a watchdog
+             * thread polling for it.
+             */
+            g_running = false;
+            pthread_cond_broadcast(&g_frameCond);
+            break;
+        }
         if (!g_running) break;
-        if (!is_socket && !g_loopFile) break;
+        if (!g_loopFile) break;
     }
 
     av_free(inbuf);
@@ -1101,12 +947,6 @@ static void load_player_config() {
             if (strcmp(key, "GAL_PLAYER_THREADS") == 0) {
                 int t = atoi(val);
                 if (t >= 1 && t <= 8) g_ffmpegThreadCount = t;
-            } else if (strcmp(key, "GAL_PLAYER_THREAD_TYPE") == 0) {
-                if (strcasecmp(val, "frame") == 0) g_ffmpegThreadType = FF_THREAD_FRAME;
-                else if (strcasecmp(val, "slice") == 0) g_ffmpegThreadType = FF_THREAD_SLICE;
-                else if (strcasecmp(val, "auto") == 0) g_ffmpegThreadType = FF_THREAD_FRAME | FF_THREAD_SLICE;
-            } else if (strcmp(key, "GAL_PLAYER_LOW_DELAY") == 0) {
-                g_ffmpegLowDelay = (atoi(val) != 0);
             } else if (strcmp(key, "GAL_PLAYER_IDLE_BYTES") == 0) {
                 g_idleMaxBytes = atoi(val);
             } else if (strcmp(key, "GAL_PLAYER_HEARTBEAT_HZ") == 0) {
@@ -1123,16 +963,6 @@ static void load_player_config() {
         int t = atoi(env_threads);
         if (t >= 1 && t <= 8) g_ffmpegThreadCount = t;
     }
-    const char* env_ttype = getenv("GAL_PLAYER_THREAD_TYPE");
-    if (env_ttype) {
-        if (strcasecmp(env_ttype, "frame") == 0) g_ffmpegThreadType = FF_THREAD_FRAME;
-        else if (strcasecmp(env_ttype, "slice") == 0) g_ffmpegThreadType = FF_THREAD_SLICE;
-        else if (strcasecmp(env_ttype, "auto") == 0) g_ffmpegThreadType = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    }
-    const char* env_lowdelay = getenv("GAL_PLAYER_LOW_DELAY");
-    if (env_lowdelay) {
-        g_ffmpegLowDelay = (atoi(env_lowdelay) != 0);
-    }
     const char* env_idle_bytes = getenv("GAL_PLAYER_IDLE_BYTES");
     if (env_idle_bytes) {
         g_idleMaxBytes = atoi(env_idle_bytes);
@@ -1147,26 +977,38 @@ static void load_player_config() {
 
 #if defined(__QNX__) || defined(__linux__)
 static int g_ack_fd = -1;
-static void write_ack() {
-    if (g_ack_fd < 0) {
-        g_ack_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (g_ack_fd >= 0) {
-            struct sockaddr_un addr;
-            memset(&addr, 0, sizeof(addr));
-            addr.sun_family = AF_UNIX;
-            strncpy(addr.sun_path, "/tmp/gal_ack.sock", sizeof(addr.sun_path) - 1);
-            if (connect(g_ack_fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-                close(g_ack_fd);
-                g_ack_fd = -1;
-                return;
-            }
-            int flags = fcntl(g_ack_fd, F_GETFL, 0);
-            fcntl(g_ack_fd, F_SETFL, flags | O_NONBLOCK);
-        }
+/*
+ * At startup, not at the first swap: the hook grants the phone's stream only
+ * once this socket is connected, and before the stream there is nothing to
+ * swap. (It used to connect on the swap of an idle "WAITING FOR SIGNAL"
+ * frame drawn after 1 s, which is why it came 1.2-1.5 s after the spawn.)
+ * A failed connect is retried on the next ACK.
+ */
+static void ack_connect() {
+    if (g_ack_fd >= 0) return;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/gal_ack.sock", sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return;
     }
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    g_ack_fd = fd;
+    LOG("ack: connected t=%llu.%03llu", T_ARGS(now_us()));
+}
+
+static void write_ack() {
+    ack_connect();
     if (g_ack_fd >= 0) {
         char b = 1;
-        int n = send(g_ack_fd, &b, 1, 0);
+        /* MSG_NOSIGNAL: once gal is gone a late ACK must fail, not raise
+         * SIGPIPE and kill the player before it restores the Kombi map. */
+        int n = send(g_ack_fd, &b, 1, MSG_NOSIGNAL);
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             close(g_ack_fd);
             g_ack_fd = -1;
@@ -1174,6 +1016,7 @@ static void write_ack() {
     }
 }
 #else
+static void ack_connect() {}
 static void write_ack() {}
 #endif
 
@@ -1205,15 +1048,6 @@ int main(int argc, char* argv[]) {
         } else if (strncmp(argv[i], "--threads=", 10) == 0) {
             int t = atoi(argv[i] + 10);
             if (t >= 1 && t <= 8) g_ffmpegThreadCount = t;
-        } else if (strncmp(argv[i], "--thread-type=", 14) == 0) {
-            const char* opt = argv[i] + 14;
-            if (strcmp(opt, "frame") == 0) g_ffmpegThreadType = FF_THREAD_FRAME;
-            else if (strcmp(opt, "slice") == 0) g_ffmpegThreadType = FF_THREAD_SLICE;
-            else if (strcmp(opt, "auto") == 0) g_ffmpegThreadType = FF_THREAD_FRAME | FF_THREAD_SLICE;
-        } else if (strcmp(argv[i], "--low-delay") == 0) {
-            g_ffmpegLowDelay = true;
-        } else if (strcmp(argv[i], "--no-low-delay") == 0) {
-            g_ffmpegLowDelay = false;
         } else if (strncmp(argv[i], "--idle-bytes=", 13) == 0) {
             g_idleMaxBytes = atoi(argv[i] + 13);
         } else if (strncmp(argv[i], "--heartbeat-hz=", 15) == 0) {
@@ -1342,6 +1176,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     InitGL();
+    ack_connect();
 
     // Pre-fill slot 0 with a blank black frame (Y=16, U=128, V=128)
     RGBABuffer* initBuf = g_framePool.getWriteBuffer(windowWidth, windowHeight);
@@ -1377,56 +1212,26 @@ int main(int argc, char* argv[]) {
     double cpuPct = 0.0;
     double processMemMb = 0.0;
 
-    uint64_t lastFrameUs = now_us();
-    bool waitingMessageShown = false;
-
     while (g_running) {
         pthread_mutex_lock(&g_frameMutex);
         while (!g_newFrameReady && g_running) {
+            /*
+             * The decoder signals every frame, and shutdown broadcasts, so
+             * this sleeps until there is something to draw. The timeout only
+             * bounds a wakeup lost to the signal handler; nothing is drawn
+             * without a frame (the cluster is not showing this window before
+             * the first keyframe anyway).
+             */
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 100000000L; // 100ms timeout
-            if (ts.tv_nsec >= 1000000000L) {
-                ts.tv_sec += 1;
-                ts.tv_nsec -= 1000000000L;
-            }
+            ts.tv_sec += 1;
             pthread_cond_timedwait(&g_frameCond, &g_frameMutex, &ts);
-
-            if (!g_newFrameReady) {
-                uint64_t idleUs = now_us() - lastFrameUs;
-
-                // Session display context: preserved throughout driving and reverse gear.
-                // Factory Context 33 is restored on clean shutdown when gal terminates (sentinel watchdog).
-
-                // Note: Self-termination on stream idle removed so player stays alive
-                // during reverse gear / pauses. The supervisor in libgal_hook.so will kill
-                // and respawn if and only if the player is genuinely hung.
-
-                if (idleUs >= 1000000ULL && !waitingMessageShown && !g_initialCmdsExecuted) {
-                    RGBABuffer* buf = g_framePool.getDisplayBuffer();
-                    if (buf && buf->pixels) {
-                        draw_text_yuv(buf->pixels, buf->width, buf->height,
-                                      274, 232, "WAITING FOR SIGNAL...", 2);
-                        waitingMessageShown = true;
-                        break;
-                    }
-                }
-            }
         }
         if (!g_running) {
             pthread_mutex_unlock(&g_frameMutex);
             break;
         }
-        if (g_newFrameReady) {
-            g_newFrameReady = false;
-            lastFrameUs = now_us();
-            waitingMessageShown = false;
-            if (!g_streamActive && !firstFrame) {
-                g_streamActive = true;
-                execute_initial_commands(true);
-            }
-            if (!g_initialCmdsExecuted) execute_initial_commands();
-        }
+        g_newFrameReady = false;
 
         uint64_t frameStartUs = now_us();
 
@@ -1477,9 +1282,9 @@ int main(int argc, char* argv[]) {
                 
                 prevFbW = w;
                 prevFbH = h;
+                if (firstFrame)
+                    LOG("render: first frame drawn t=%llu.%03llu", T_ARGS(now_us()));
                 firstFrame = false;
-                g_streamActive = true;
-                execute_initial_commands();
             } else {
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w/2, h/2, GL_LUMINANCE, GL_UNSIGNED_BYTE, pV);
             }
@@ -1600,7 +1405,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Instantly restore factory display context before anything else!
+    // Put the stock Kombi map back (if this player switched it) before anything else.
     execute_final_commands();
 
     // Ensure decoder thread is unblocked from recv()
