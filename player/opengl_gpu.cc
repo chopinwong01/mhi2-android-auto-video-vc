@@ -203,7 +203,7 @@ static volatile int g_streamSock = -1;
 static volatile bool g_newFrameReady = false;
 static uint64_t g_decodedFrameCount = 0;
 static uint64_t g_lastDecodeDurationUs = 0;
-static char g_videoSource[512] = "unix:///tmp/gal_video.sock";
+static char g_videoSource[512] = "tcp://127.0.0.1:12346";
 static bool g_isSocket = false;
 
 int windowWidth  = 800;

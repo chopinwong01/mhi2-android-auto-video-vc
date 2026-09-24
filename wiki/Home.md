@@ -39,7 +39,7 @@ This project focuses on the **native C preload hook and hardware video streaming
 3. **[Architecture Deep-Dive](Architecture-Deep-Dive.md)**
    * Google Automotive Link (`gal`) internal structure
    * Dynamic heap injection of `ProtocolEndpointBase` & focus controller (`focus_ctl`)
-   * Unix domain socket transport (`/tmp/gal_video.sock`) with helper init guard
+   * TCP loopback transport (`127.0.0.1:12346` / 2MB buffer) vs `AF_UNIX` 5KB buffer bottleneck
    * Low-delay zero-frame-delay flow control vs 3.3 FPS deadlock failure
    * Tegra 3 `glDrawTextureNV` hardware blitter
 4. **[Companion HMI Integration](Companion-HMI-Integration.md)**
@@ -50,7 +50,7 @@ This project focuses on the **native C preload hook and hardware video streaming
 5. **[Troubleshooting & Diagnostics](Troubleshooting-and-Diagnostics.md)**
    * Diagnostic inspection with `hook_status.sh`
    * Telemetry benchmarks (27.89 FPS, 0 drops, 38.9% idle headroom)
-   * Resolving `FF_THREAD_FRAME` phone credit deadlocks, early IDR drops, and socket unlinks
+   * Diagnosing AF_UNIX buffer starvation, `FF_THREAD_FRAME` phone credit deadlocks, and early IDR drops
 6. **[Build Environment & Toolchain](Build-Environment.md)**
    * Setting up the Docker MIB SDK
    * Cross-compiling `libgal_hook.so`
@@ -64,14 +64,13 @@ This project focuses on the **native C preload hook and hardware video streaming
   * Implemented via `focus_ctl.c` / `focus_ctl.h`. Holds secondary sink in mode 2 (native) until `stream-player` connects, triggering an immediate native SPS/PPS + IDR keyframe from the phone.
   * Verified Kombi map readiness check (`GAL_FOCUS_WAIT_KOMBI`).
   * Seamless RVC transitions via 250ms socket buffer with live secondary sink.
-* [x] **Unix Domain Socket Migration:**
-  * Implemented via `unix:///tmp/gal_video.sock`.
-  * `HOOK_FIX_HELPER_INIT_GUARD` prevents child helper processes from running destructors and unlinking the socket file.
+* [x] ~~**Unix Domain Socket Migration (`AF_UNIX`)**~~ *(Evaluated & Abandoned — Proven RTOS Limitation)*:
+  * Measured on-car via `vc_sockbuf`: QNX 6.5.0 hardcodes `AF_UNIX` buffers to **7,168 bytes send / 5,120 bytes receive**, and `setsockopt(SO_SNDBUF/SO_RCVBUF)` is completely ignored. Transmitting 28 KB–140 KB H.264 video frames required 6 to 27 round trips per frame, collapsing framerate to **3.3–4 FPS**. Furthermore, both families are served by `io-pkt`. TCP loopback (`tcp://127.0.0.1:12346`) with 2 MB buffers is the definitive production transport.
 * [x] **Zero Frame Delay Decoding Pipeline:**
   * Replaced `FF_THREAD_FRAME` with `AV_CODEC_FLAG_LOW_DELAY` (`FF_THREAD_SLICE`) to eliminate the 3.3 FPS / 300ms phone credit timeout deadlock.
 * [ ] **Hardware NVSS / NvMedia Video Decoder Renderer:**
   * Transition from software multi-threaded FFmpeg decoding to hardware video decoding via **NvSS / NvMedia** (`/dev/nvss`, Nvidia Tegra hardware video decoder), substantially cutting Cortex-A9 CPU utilization.
-* [x] ~~**GPS Sensor Uncertainty Hook (Tunnel Loss Prevention)**~~ *(Abandoned — Proven Dead-End)*:
+* [x] ~~**GPS Sensor Uncertainty Hook (Tunnel Loss Prevention)**~~ *(Abandoned — Proven Architectural Dead-End)*:
   * Artificially clamping accuracy corrupted Google Maps' Extended Kalman Filter ($R_k \to 0$), causing compass spinning and route flapping. Removed; vehicle's rock-solid Kombi / ESP dead-reckoning hardware passes through uncorrupted.
 
 ---

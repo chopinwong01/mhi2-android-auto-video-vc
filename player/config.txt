@@ -5,8 +5,8 @@ portraitTexCoords = 0.0 0.0 1.0 0.0 1.0 1.0 0.0 1.0
 backgroundColor = 0.0 0.0 0.0 1.0
 windowWidth = 800
 windowHeight = 480
-# Stream source URI. The Unix socket is the default transport on this branch.
-streamUrl = unix:///tmp/gal_video.sock
+# Stream source URI. TCP is the production transport on QNX 6.5.0 due to AF_UNIX 5KB buffer limits.
+streamUrl = tcp://127.0.0.1:12346
 
 # Decoder/render behavior
 dropFramesWhenBusy = 1

@@ -42,7 +42,7 @@ Modern Volkswagen Group vehicles equipped with the Virtual Cockpit (Active Info 
 [ Android Phone ] --(AAP USB)--> [ MIB2 gal Daemon ]
                                          │
                                   [ libgal_hook.so ]
-                                         │ (Unix Domain Socket /tmp/gal_video.sock)
+                                         │ (TCP loopback 127.0.0.1:12346 / 2MB Buffer)
                                          ▼
                                   [ stream-player ]
                                          │ (glDrawTextureNV -> Context 70)
@@ -67,7 +67,7 @@ mhi2-android-auto-video-vc/
 │   ├── focus_ctl.c          # Secondary video focus state machine & phone credit pacing
 │   ├── focus_ctl.h
 │   ├── video_sink_hook.c    # ProtocolEndpointBase allocation & Channel 3 spoof
-│   ├── vc_stream_out.c      # Unix domain socket streaming & player-ACK flow control
+│   ├── vc_stream_out.c      # 2MB TCP loopback streaming & player-ACK flow control
 │   ├── vc_stream_out.h
 │   ├── vc_player_mgr.c      # Automatic stream-player process supervisor & Kombi watcher
 │   └── vc_player_mgr.h
@@ -106,7 +106,7 @@ The dual-screen projection pipeline executes across four synchronized phases fro
          ▼
   [ MIB2 gal Daemon ] ◄── (libgal_hook.so holds mode 2; grants mode 1 on player connect)
          │
-  Phase 2: H.264 NALU Stream (/tmp/gal_video.sock)
+  Phase 2: H.264 NALU Stream (tcp://127.0.0.1:12346, 2MB Buffer)
          ▼
   [ stream-player ] ◄── (Zero-delay low-delay decode, AV_CODEC_FLAG_LOW_DELAY)
          │
@@ -122,12 +122,13 @@ The dual-screen projection pipeline executes across four synchronized phases fro
 ### 1. Dynamic Service Injection & Focus Control (`focus_ctl`)
 * **Dynamic Protocol Allocation:** The stock `/usr/bin/gal` daemon strictly rejects secondary screen blocks in `gal.json`. `libgal_hook.so` intercepts `GalReceiver::registerService`, dynamically allocates a C++ `ProtocolEndpointBase` structure in heap memory, and binds it into GAL's internal dispatch table at offset `service_id + 0x40`.
 * **Why Static Focus Failed (The Early-Stream Flood):** Earlier prototypes hardcoded static focus (`sink+0x30 = 1u`). Android Auto immediately flooded H.264 frames before `stream-player` launched or the Kombi cluster was ready, dropping initial IDR keyframes and causing green artifact flashes.
-* **The Dynamic Focus Solution:** `focus_ctl.c` holds the secondary sink in focus mode 2 (native: projection inactive) until `stream-player` connects to `/tmp/gal_video.sock` and the Kombi map is verified ready (`GAL_FOCUS_WAIT_KOMBI`). Only then is mode 1 granted. The phone responds by naturally emitting a fresh, clean SPS/PPS parameter set and IDR keyframe directly to the player.
+* **The Dynamic Focus Solution:** `focus_ctl.c` holds the secondary sink in focus mode 2 (native: projection inactive) until `stream-player` connects to the stream socket and the Kombi map is verified ready (`GAL_FOCUS_WAIT_KOMBI`). Only then is mode 1 granted. The phone responds by naturally emitting a fresh, clean SPS/PPS parameter set and IDR keyframe directly to the player.
 
-### 2. High-Performance Transport: Unix Domain Socket (`/tmp/gal_video.sock`)
-* **Why Early Unix Sockets Failed (The Child Destructor Trap):** Helper child processes spawned by GAL inherited `LD_PRELOAD` of `libgal_hook.so` and on exit executed `unlink("/tmp/gal_video.sock")`, deleting the socket file out from under the running daemon. While TCP loopback temporarily worked around this, it added TCP stack latency and buffer tuning overhead.
-* **The Helper Init Guard (`HOOK_FIX_HELPER_INIT_GUARD`):** By inspecting process identity on startup, child helper processes skip hook initialization entirely, permanently eliminating the destructor unlink trap. Video NALUs stream directly over `/tmp/gal_video.sock` with minimal latency and zero TCP network overhead.
-* **RVC / OPS Resilience:** A **250ms socket write timeout** smoothly absorbs transient display pauses (e.g., shifting into Reverse gear for the Rear View Camera or parking sensors). Keeping the secondary video sink continuously live in combination with this 250ms buffer allows playback to resume instantaneously when shifting back into Drive (D), completely avoiding the latency and keyframe renegotiation overhead of focus cycling.
+### 2. High-Speed Loopback Transport: TCP vs. AF_UNIX Buffer Limits
+* **Why AF_UNIX Failed (The 5 KB Buffer Bottleneck):** On QNX 6.5.0 SP1, `AF_UNIX` stream sockets are hardcoded to a fixed buffer of **7,168 bytes send / 5,120 bytes receive**, and `setsockopt(SO_SNDBUF/SO_RCVBUF)` is completely ignored. Because cluster H.264 video frames range from 28 KB (p95) to 140 KB (IDR keyframes), transmitting over AF_UNIX required 6 to 27 round trips per frame through the 5 KB window, thrashing the scheduler and collapsing framerate to **3.3–4 FPS**. Furthermore, both families are serviced by `io-pkt`, so AF_UNIX offered zero process bypass advantage.
+* **The Production Solution (TCP Loopback):** `tcp://127.0.0.1:12346` accepts full 2 MB socket buffers (`SO_SNDBUF` / `SO_RCVBUF`), allowing even 140 KB keyframes to cross in a single atomic write and sustaining an unbroken **25–30 FPS**.
+* **Helper Init Guard (`HOOK_FIX_HELPER_INIT_GUARD`):** By inspecting process identity on startup, child helper processes skip hook initialization entirely, preventing any process exit destructors from interfering with the socket environment.
+* **RVC / OPS Resilience:** A **250ms socket write timeout** smoothly absorbs transient display pauses (e.g., shifting into Reverse gear for the Rear View Camera or parking sensors). Keeping the secondary video sink continuously live in combination with this 250ms buffer allows playback to resume instantaneously when shifting back into Drive (D), avoiding the latency and keyframe renegotiation overhead of focus cycling.
 
 ### 3. Low-Delay Zero-Frame-Delay Decoding (`stream-player`)
 * **Why Multi-Frame Threading Failed (The 3.3 FPS Deadlock):** Early builds configured FFmpeg with `FF_THREAD_FRAME`. Frame threading holds each decoded frame until the *subsequent* packet arrives. Under hardware flow control (which withholds ACKs until display swap), the phone exhausted its sliding-window credit and paused waiting for an ACK before sending the next packet. This circular lock caused a ~300ms phone timeout per frame, collapsing playback to **3.3 FPS with 313ms latency**.
@@ -193,9 +194,8 @@ See [player/README.md](player/README.md) for build instructions linking against 
   * Implemented via `focus_ctl.c` / `focus_ctl.h`. Holds secondary sink in mode 2 (native) until `stream-player` connects, triggering an immediate native SPS/PPS + IDR keyframe from the phone.
   * Verified Kombi map readiness check (`GAL_FOCUS_WAIT_KOMBI`).
   * Seamless RVC transitions via 250ms socket buffer with live secondary sink.
-* [x] **Unix Domain Socket Migration:**
-  * Implemented via `unix:///tmp/gal_video.sock`.
-  * `HOOK_FIX_HELPER_INIT_GUARD` prevents child helper processes from running destructors and unlinking the socket file.
+* [x] ~~**Unix Domain Socket Migration (`AF_UNIX`)**~~ *(Evaluated & Abandoned — Proven RTOS Limitation)*:
+  * Measured on-car via `vc_sockbuf`: QNX 6.5.0 hardcodes `AF_UNIX` buffers to **7,168 bytes send / 5,120 bytes receive**, and `setsockopt(SO_SNDBUF/SO_RCVBUF)` is completely ignored. Transmitting 28 KB–140 KB H.264 video frames required 6 to 27 round trips per frame, collapsing framerate to **3.3–4 FPS**. Furthermore, both families are served by `io-pkt`. TCP loopback (`tcp://127.0.0.1:12346`) with 2 MB buffers is the definitive production transport.
 * [x] **Zero Frame Delay Decoding Pipeline:**
   * Replaced `FF_THREAD_FRAME` with `AV_CODEC_FLAG_LOW_DELAY` (`FF_THREAD_SLICE`) to eliminate the 3.3 FPS / 300ms phone credit timeout deadlock.
 * [ ] **Hardware NVSS / NvMedia Video Decoder Renderer:**

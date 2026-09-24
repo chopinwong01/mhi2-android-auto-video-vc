@@ -13,7 +13,7 @@ sh /fs/sda0/scripts/hook_status.sh
 1. **Supervisor Environment Limit:** Asserts `envs` count in `smartphone_integrator.json` is $\le 10$.
 2. **Library Preload:** Confirms `libgal_hook.so` is resident in `/mnt/app/eso/lib/gal_dualscreen/` and executable.
 3. **Active Processes:** Checks whether `gal` and `stream-player` are actively running.
-4. **Socket Status:** Verifies that Unix domain socket `/tmp/gal_video.sock` and ACK pipe `/tmp/gal_ack.sock` are active.
+4. **Socket Status:** Verifies that TCP loopback port `12346` and ACK pipe `/tmp/gal_ack.sock` are active.
 
 ---
 
@@ -36,8 +36,8 @@ During a 15-minute real-world test drive on a 2019 Volkswagen Golf Mk7.5 (Tegra 
 
 | Symptom | Probable Cause | Immediate Resolution |
 | :--- | :--- | :--- |
+| **Severe stutter / ~3.3–4 FPS on AF_UNIX** | QNX 6.5.0 AF_UNIX buffer is hardcoded to 5 KB; 28KB–140KB frames require 6–27 round trips per frame. | Use production TCP loopback (`GAL_STREAM_TRANSPORT=tcp`, port 12346) which supports full 2 MB socket buffers. |
 | **Severe stutter / ~3.3 FPS with ~300ms latency** | Multi-frame threading (`FF_THREAD_FRAME`) buffered frames while flow control withheld ACK, exhausting phone credit. | Ensure `stream-player` runs with `AV_CODEC_FLAG_LOW_DELAY` and `FF_THREAD_SLICE` (zero frame delay). |
-| **Socket `/tmp/gal_video.sock` unlinked on startup** | Helper child processes spawned by GAL inherited hook and ran C destructors on exit. | Verify `HOOK_FIX_HELPER_INIT_GUARD` is active so spawned children skip hook initialization. |
 | **First frame corrupted / green flash on connection** | Static focus mode 1 granted before `stream-player` was connected, dropping early IDR keyframe. | Enable `focus_ctl` (`GAL_FOCUS_CONTROL=1`) to hold mode 2 until player connects, triggering a fresh phone IDR. |
 | **Cluster drops when shifting into reverse** | Socket write timeout too short or idle context revert timer active. | Ensure write timeout is **250ms** (`tv_usec = 250000`). Never use idle context timers while driving. |
 | **Green artifacts / macroblock tearing** | Flow control disabled or unpaced USB ACKs overflowing buffers. | Ensure Player-ACK pipe (`/tmp/gal_ack.sock`) is active and written by `stream-player`. |
