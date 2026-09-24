@@ -9,7 +9,7 @@ It summarizes the constraints that should shape future changes.
 elementary stream to `stream-player`.
 
 **Reason:** stock GAL has one shared `CVideoRenderer`. Forwarding secondary
-`playbackStart` to it can reconfigure the primary path and blank the center
+`playbackStart` to it can reconfigure the primary path and blank the cente
 display. This is an ownership issue, not merely a performance problem.
 
 **Implication:** do not “fix” a black cluster by switching to output mode `gal`
@@ -73,16 +73,18 @@ the secondary object the same ABI family without rewriting the primary path.
 Do not deduplicate them into a clever shared object merely because the fields
 appear similar in a decompiler.
 
-## TCP is a lifecycle choice
+## TCP Loopback is the Definitive Video Transport
 
-**Decision:** use TCP loopback for video, despite its overhead.
+**Decision:** Use TCP loopback (`tcp://127.0.0.1:12346` with 2 MB buffers) for video transport.
 
-**Reason:** a pathname-backed UNIX-domain video socket can be removed by a
-preloaded child process during destructor cleanup. TCP has no filesystem path to
-unlink and can provide bounded non-blocking writes.
+**Reason:**
+1. **Immutable RTOS Buffer Limit on QNX 6.5.0:** Measured on-car with `vc_sockbuf`, QNX 6.5.0 SP1 hardcodes `AF_UNIX` stream sockets to **7,168 bytes send / 5,120 bytes receive**, and `setsockopt(SO_SNDBUF/SO_RCVBUF)` is completely ignored. Transmitting 28 KB (p95) to 140 KB (IDR keyframes) H.264 video frames over `AF_UNIX` requires 6 to 27 round trips per frame through the 5 KB window, thrashing the scheduler and collapsing video throughput to **3.3–4 FPS**.
+2. **Full 2 MB Socket Buffering on TCP:** TCP loopback (`AF_INET`) accepts full 2 MB socket buffers (`setsockopt(SO_SNDBUF/SO_RCVBUF, 2097152)`), allowing even 140 KB keyframes to cross in a single atomic write at **25–30 FPS**.
+3. **No Context-Switch Advantage for AF_UNIX:** On QNX 6.5.0, both `AF_UNIX` and `AF_INET` are handled by the same `io-pkt` network manager daemon.
+4. **Filesystem Destructor Safety:** A pathname-backed UNIX-domain socket (`/tmp/gal_video.sock`) can be accidentally unlinked if an un-guarded child process executes shared library destructors on exit. TCP has no filesystem path to unlink.
 
-**Implication:** AF_UNIX migration must first solve descriptor inheritance and
-socket ownership. It is not a mechanical performance refactor.
+**Implication:** TCP loopback is not a temporary fallback; it is the definitive, high-throughput production transport on Harman MIB2 QNX 6.5.0.
+
 
 ## Treat decoder bootstrap as a protocol contract
 
@@ -113,7 +115,7 @@ on a single visual correlation.
 ## ACK feedback is deliberately fail-open
 
 **Decision:** defer phone ACKs to player presentation while feedback is healthy,
-but resume immediate ACKs if the player has not connected or becomes silent for
+but resume immediate ACKs if the player has not connected or becomes silent fo
 more than 500 ms.
 
 **Reason:** waiting indefinitely turns a player failure into a phone-session
@@ -205,7 +207,7 @@ results. An exact override also takes precedence over scalar settings.
 **Implication:** a geometry screenshot without the emitted bytes is incomplete
 evidence. Update or remove the hex override deliberately for every field test.
 
-## Treat LLM assistance as an untrusted hypothesis generator
+## Treat LLM assistance as an untrusted hypothesis generato
 
 **Decision:** use LLMs for navigation, drafting, code review, and generating
 test hypotheses, but never treat their explanation, decompilation narrative,

@@ -33,6 +33,19 @@ This project has been extensively field-tested and telemetry-verified on:
 * **Virtual Screen Injection Resolution:** **800×480 @ 30 fps**
 * **Routing:** Display ID `4`, Context `70`, Displayable `3` over MOST150 `/dev/mlb/isoTX2`.
 
-### 2. Tegra 3 Decoding Capacity & The 30 FPS Cap
+### 2. Primary Infotainment Display
+* **Physical Unit:** Discover Pro 9.2" (1280×640) full-glass capacitive touchscreen.
+* **Control Reality:** **Zero physical rotary knobs** (no volume knob, no tuning/zoom knob). All center console interactions are purely capacitive touch, with a single physical/capacitive power button.
+* **Primary Video Rendering:** Handled natively by stock `gal` via OpenMAX / KD surfaces on Display 1.
+
+### 3. Tegra 3 Decoding Capacity & The 30 FPS Cap
 * The Nvidia Tegra 3 hardware video decoder cannot sustain concurrent 1080p@60fps primary video alongside a 800×480 secondary video stream.
 * **The Rule:** Forcing the primary screen to **30 fps** (`"supportedFrameRates": [ 30 ]` in `gal.json`) cuts decode workloads in half, preventing thermal throttling, frame stutter, and audio/video desync.
+
+---
+
+## Vehicle Physical Control Interfaces
+
+* **Steering Wheel Controls:** The Volkswagen Golf Mk7.5 Multi-Function Steering Wheel (MFL) uses flat physical **push-buttons / D-pad** (Up, Down, Left, Right, OK). There are **no scroll wheels or thumbwheels**. Map zooming via companion HMI patches maps to physical D-pad Up (zoom in, BAP key event 6) and Down (zoom out, BAP key event 7).
+* **Center Console Controls:** All center console menu selections and gestures are capacitive touch on the glass screen. Reboots are performed by holding the power button for 10 seconds.
+

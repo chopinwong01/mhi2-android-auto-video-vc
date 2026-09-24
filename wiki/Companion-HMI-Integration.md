@@ -17,7 +17,7 @@ While `libgal_hook.so` and `stream-player` manage the video stream at the QNX RT
 For interactive controls, the companion project [`mib2-android-auto-vc`](https://github.com/chopinwong01/mib2-android-auto-vc) provides `VCAndroidAuto.jar` / `VCAndroidAuto_mapmode.jar`.
 
 ### Key Capabilities
-1. **Steering Wheel Zoom:** Intercepts Multi-Function Steering Wheel (MFL) right-thumb scroll wheel events (BAP key events 6 and 7) and converts them to Android Auto map zoom in/out commands.
+1. **Steering Wheel Zoom:** Intercepts Multi-Function Steering Wheel (MFL) right-side physical D-pad Up/Down button events (BAP key events 6 and 7) and converts them to Android Auto map zoom in/out commands.
 2. **D-Pad Route Guidance Injection:** Passes cluster navigation menu button events into Android Auto.
 3. **Maneuver Banner Suppression:** Suppresses duplicate OEM turn-by-turn prompts that overlap with the projected map.
 4. **Listener Null Guards:** Prevents NullPointerExceptions during app transitions when `NavigationListener` is not yet bound.

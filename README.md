@@ -16,7 +16,7 @@ This project provides the **native C preload hook and hardware video streaming p
 * 🧭 **[NavActiveIgnore](https://github.com/jille/mib2-navignore)** (`navignore` *(by [@jille](https://github.com/jille) / [M.I.B.](https://github.com/Mr-MIBoner/M.I.B._More-Incredible-Bash))*  
   The **minimum baseline requirement** on the vehicle's Java HMI. Bypasses the factory mutual exclusion check so phone navigation and cluster displays run concurrently without kicking each other out.
 * 🎮 **[mib2-android-auto-vc](https://github.com/chopinwong01/mib2-android-auto-vc)** *(by [@chopinwong01](https://github.com/chopinwong01))*  
-  The **companion Java HMI patch** (`VCAndroidAuto_mapmode.jar`). Routes steering wheel (MFL) scroll wheel events to zoom the Android Auto cluster map, injects D-pad keys, and suppresses duplicate cluster turn banners.
+  The **companion Java HMI patch** (`VCAndroidAuto_mapmode.jar`). Routes steering wheel (MFL) D-pad Up/Down button events to zoom the Android Auto cluster map, injects D-pad keys, and suppresses duplicate cluster turn banners.
 * 🛠️ **[MIB SDK](https://gitlab.com/andrewleech/mibsdk)** *(by [@andrewleech](https://github.com/andrewleech))*  
   The Dockerized QNX Neutrino 6.5.0 cross-compilation toolchain used to build all native binaries.
 
@@ -69,7 +69,7 @@ mhi2-android-auto-video-vc/
 │   ├── video_sink_hook.c    # ProtocolEndpointBase allocation & Channel 3 spoof
 │   ├── vc_stream_out.c      # 2MB TCP loopback streaming & player-ACK flow control
 │   ├── vc_stream_out.h
-│   ├── vc_player_mgr.c      # Automatic stream-player process supervisor & Kombi watcher
+│   ├── vc_player_mgr.c      # Automatic stream-player process supervisor & Kombi watche
 │   └── vc_player_mgr.h
 ├── player/                  # Cluster video renderer (stream-player)
 │   ├── opengl_gpu.cc        # Low-delay zero-frame-delay renderer (glDrawTextureNV)
@@ -80,7 +80,7 @@ mhi2-android-auto-video-vc/
 │   ├── enable_hook.sh       # Patches smartphone_integrator.json (enforces Rule of 10)
 │   ├── disable_hook.sh      # Clean uninstaller & factory backup restoration
 │   ├── hook_status.sh       # In-car diagnostic utility for hook & player status
-│   ├── lib_app_mount.sh     # Shared /mnt/app safe mounting helper
+│   ├── lib_app_mount.sh     # Shared /mnt/app safe mounting helpe
 │   ├── deploy_to_car.sh     # SCP / SSH deployment script
 │   └── gal_dualscreen.conf.example # Configuration file template
 └── wiki/                    # Comprehensive documentation & engineering runbooks
@@ -147,14 +147,14 @@ The dual-screen projection pipeline executes across four synchronized phases fro
 The video pipeline operates independently at the QNX RTOS level. To integrate with the Volkswagen Java HMI:
 
 * **Minimum Requirement (`NavActiveIgnore`):** Suppresses the mutual exclusion check that prevents Android Auto and cluster navigation from running concurrently.
-* **Full Steering Wheel Integration:** See [wiki/Companion-HMI-Integration.md](wiki/Companion-HMI-Integration.md) for details on [`mib2-android-auto-vc`](https://github.com/chopinwong01/mib2-android-auto-vc) which adds steering wheel scroll wheel zoom and D-pad key routing.
+* **Full Steering Wheel Integration:** See [wiki/Companion-HMI-Integration.md](wiki/Companion-HMI-Integration.md) for details on [`mib2-android-auto-vc`](https://github.com/chopinwong01/mib2-android-auto-vc) which adds steering wheel D-pad Up/Down button zoom and key routing.
 
 ---
 
 ## Building
 
 ### Prerequisites
-* Docker
+* Docke
 * Access to the MIB SDK Docker image: `registry.gitlab.com/andrewleech/mibsdk:latest`
 
 ### Building the Preload Hook (`libgal_hook.so`)
