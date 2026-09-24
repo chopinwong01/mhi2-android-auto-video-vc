@@ -10,7 +10,7 @@ This project focuses on the **native C preload hook and hardware video streaming
 
 * 📺 **[VcMOSTRenderMqb](https://github.com/andrewleech/VcMOSTRenderMqb)** *(by [@andrewleech](https://github.com/andrewleech))* — Pioneer MOST150 video transmission and Tegra 3 OpenKODE/GLES2 rendering foundation.
 * 🧭 **[NavActiveIgnore](https://github.com/jille/mib2-navignore)** (`navignore` *(by [@jille](https://github.com/jille) / [M.I.B.](https://github.com/Mr-MIBoner/M.I.B._More-Incredible-Bash))* — Baseline vehicle Java HMI patch to suppress mutual exclusion lockouts between factory maps and Android Auto.
-* 🎮 **[mib2-android-auto-vc](https://github.com/chopinwong01/mib2-android-auto-vc)** *(by [@chopinwong01](https://github.com/chopinwong01))* — Companion Java HMI patch (`VCAndroidAuto_mapmode.jar`) for MFL steering wheel zoom and cluster D-pad controls.
+* 🎮 **[mib2-android-auto-vc](https://github.com/adi961/mib2-android-auto-vc)** *(by [@adi961](https://github.com/adi961))* — Foundational Java HMI patch (`VCAndroidAuto.jar` / `VCAndroidAuto_mapmode.jar`) for MFL steering wheel zoom and cluster D-pad controls.
 * 🛠️ **[MIB SDK](https://gitlab.com/andrewleech/mibsdk)** *(by [@andrewleech](https://github.com/andrewleech))* — Official Dockerized QNX 6.5.0 SP1 cross-toolchain.
 
 ---
@@ -41,7 +41,7 @@ This project focuses on the **native C preload hook and hardware video streaming
    * Dynamic heap injection of `ProtocolEndpointBase` & focus controller (`focus_ctl`)
    * TCP loopback transport (`127.0.0.1:12346` / 2MB buffer) vs `AF_UNIX` 5KB buffer bottleneck
    * Low-delay zero-frame-delay flow control vs 3.3 FPS deadlock failure
-   * Tegra 3 `glDrawTextureNV` hardware blitter
+   * Tegra 3 `glDrawTextureNV` hardware blitte
 4. **[Companion HMI Integration](Companion-HMI-Integration.md)**
    * Baseline requirement: `NavActiveIgnore` (suppressing factory map lockouts)
    * Full HMI features: `VCAndroidAuto_mapmode.jar` / `mib2-android-auto-vc`
@@ -75,5 +75,5 @@ This project focuses on the **native C preload hook and hardware video streaming
 
 ---
 
-## ⚠️ Important Disclaimer
+## ⚠️ Important Disclaime
 This project is an experimental research endeavor intended strictly for personal study and educational exploration. Modifying automotive infotainment firmware carries inherent risks of permanent bricking or software instability. Always keep verified eMMC/NAND backups before modifying unit configurations.

@@ -15,8 +15,8 @@ This project provides the **native C preload hook and hardware video streaming p
   The foundational MOST150 video transmission and Tegra 3 OpenKODE/GLES2 cluster rendering architecture adapted by `stream-player`.
 * 🧭 **[NavActiveIgnore](https://github.com/jille/mib2-navignore)** (`navignore` *(by [@jille](https://github.com/jille) / [M.I.B.](https://github.com/Mr-MIBoner/M.I.B._More-Incredible-Bash))*  
   The **minimum baseline requirement** on the vehicle's Java HMI. Bypasses the factory mutual exclusion check so phone navigation and cluster displays run concurrently without kicking each other out.
-* 🎮 **[mib2-android-auto-vc](https://github.com/chopinwong01/mib2-android-auto-vc)** *(by [@chopinwong01](https://github.com/chopinwong01))*  
-  The **companion Java HMI patch** (`VCAndroidAuto_mapmode.jar`). Routes steering wheel (MFL) D-pad Up/Down button events to zoom the Android Auto cluster map, injects D-pad keys, and suppresses duplicate cluster turn banners.
+* 🎮 **[mib2-android-auto-vc](https://github.com/adi961/mib2-android-auto-vc)** *(by [@adi961](https://github.com/adi961))*  
+  The foundational **Java HMI patch** (`VCAndroidAuto.jar` / `VCAndroidAuto_mapmode.jar`). Routes steering wheel (MFL) D-pad Up/Down button events to zoom the Android Auto cluster map, injects D-pad keys, and suppresses duplicate cluster turn banners.
 * 🛠️ **[MIB SDK](https://gitlab.com/andrewleech/mibsdk)** *(by [@andrewleech](https://github.com/andrewleech))*  
   The Dockerized QNX Neutrino 6.5.0 cross-compilation toolchain used to build all native binaries.
 
@@ -147,7 +147,7 @@ The dual-screen projection pipeline executes across four synchronized phases fro
 The video pipeline operates independently at the QNX RTOS level. To integrate with the Volkswagen Java HMI:
 
 * **Minimum Requirement (`NavActiveIgnore`):** Suppresses the mutual exclusion check that prevents Android Auto and cluster navigation from running concurrently.
-* **Full Steering Wheel Integration:** See [wiki/Companion-HMI-Integration.md](wiki/Companion-HMI-Integration.md) for details on [`mib2-android-auto-vc`](https://github.com/chopinwong01/mib2-android-auto-vc) which adds steering wheel D-pad Up/Down button zoom and key routing.
+* **Full Steering Wheel Integration:** See [wiki/Companion-HMI-Integration.md](wiki/Companion-HMI-Integration.md) for details on [`mib2-android-auto-vc`](https://github.com/adi961/mib2-android-auto-vc) which adds steering wheel D-pad Up/Down button zoom and key routing.
 
 ---
 
